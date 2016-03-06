@@ -9,19 +9,28 @@ import (
 )
 
 const (
-	RequestHeaderName        = "requestHeader"
-	ResponseHeaderName       = "responseHeader"
+	// Deprecated: use setRequestHeader or appendRequestHeader
+	RequestHeaderName = "requestHeader"
+
+	// Deprecated: use setRequestHeader or appendRequestHeader
+	ResponseHeaderName = "responseHeader"
+
+	// Deprecated: use redirectTo
+	RedirectName = "redirect"
+
 	SetRequestHeaderName     = "setRequestHeader"
 	SetResponseHeaderName    = "setResponseHeader"
 	AppendRequestHeaderName  = "appendRequestHeader"
 	AppendResponseHeaderName = "appendResponseHeader"
-	HealthCheckName          = "healthcheck"
-	ModPathName              = "modPath"
-	RedirectName             = "redirect"
-	RedirectToName           = "redirectTo"
-	StaticName               = "static"
-	StripQueryName           = "stripQuery"
-	PreserveHostName         = "preserveHost"
+	DropRequestHeaderName    = "dropRequestHeader"
+	DropResponseHeaderName   = "dropResponseHeader"
+
+	HealthCheckName  = "healthcheck"
+	ModPathName      = "modPath"
+	RedirectToName   = "redirectTo"
+	StaticName       = "static"
+	StripQueryName   = "stripQuery"
+	PreserveHostName = "preserveHost"
 	StatusName               = "status"
 )
 
@@ -34,9 +43,11 @@ func MakeRegistry() filters.Registry {
 		NewRequestHeader(),
 		NewSetRequestHeader(),
 		NewAppendRequestHeader(),
+		NewDropRequestHeader(),
 		NewResponseHeader(),
 		NewSetResponseHeader(),
 		NewAppendResponseHeader(),
+		NewDropResponseHeader(),
 		NewModPath(),
 		NewHealthCheck(),
 		NewStatic(),
