@@ -31,7 +31,7 @@ const (
 	StaticName       = "static"
 	StripQueryName   = "stripQuery"
 	PreserveHostName = "preserveHost"
-	StatusName               = "status"
+	StatusName       = "status"
 )
 
 // Returns a Registry object initialized with the default set of filter
