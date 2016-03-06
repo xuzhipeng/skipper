@@ -9,8 +9,12 @@ import (
 )
 
 const (
-	RequestHeaderName  = "requestHeader"
-	ResponseHeaderName = "responseHeader"
+	RequestHeaderName        = "requestHeader"
+	ResponseHeaderName       = "responseHeader"
+	SetRequestHeaderName     = "setRequestHeader"
+	SetResponseHeaderName    = "setResponseHeader"
+	AppendRequestHeaderName  = "appendRequestHeader"
+	AppendResponseHeaderName = "appendResponseHeader"
 	HealthCheckName    = "healthcheck"
 	ModPathName        = "modPath"
 	RedirectName       = "redirect"
@@ -28,7 +32,11 @@ func MakeRegistry() filters.Registry {
 	r := make(filters.Registry)
 	for _, s := range []filters.Spec{
 		NewRequestHeader(),
+		NewSetRequestHeader(),
+		NewAppendRequestHeader(),
 		NewResponseHeader(),
+		NewSetResponseHeader(),
+		NewAppendResponseHeader(),
 		NewModPath(),
 		NewHealthCheck(),
 		NewStatic(),
