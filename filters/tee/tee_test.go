@@ -11,6 +11,7 @@ import (
 
 	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/filters"
+	"github.com/zalando/skipper/filters/diag"
 	"github.com/zalando/skipper/filters/filtertest"
 	"github.com/zalando/skipper/proxy/proxytest"
 )
@@ -199,4 +200,67 @@ func TestTeeArgsForFailure(t *testing.T) {
 		}
 
 	}
+}
+
+func TestHeadersCloned(t *testing.T) {
+	// start two backends
+	// start a proxy with a tee route
+	// make a request
+
+	check := map[string]string{
+		"User-Agent": "foo",
+		"X-Test":     "bar",
+	}
+
+	h := func(which string) http.Handler {
+		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			for n, v := range check {
+				if r.Header.Get(n) != v {
+					t.Error("wrong/missing header in backend: ", which, n, v, r.Header.Get(n))
+				}
+
+				if len(r.Header[n]) > 1 {
+					t.Error("unexpected header in backend: ", which, n, r.Header[n])
+				}
+			}
+		})
+	}
+
+	st := httptest.NewServer(h("tee"))
+	defer st.Close()
+	sm := httptest.NewServer(h("main"))
+	defer sm.Close()
+
+	// insert a latency after the tee() to avoid false positives by making sure
+	// that the tee request is made before the main backend request:
+	r, err := eskip.Parse(fmt.Sprintf(`* -> tee("%s") -> backendLatency(120) -> "%s"`, st.URL, sm.URL))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	fr := make(filters.Registry)
+	fr.Register(NewTee())
+	fr.Register(diag.NewBackendLatency())
+	p := proxytest.New(fr, r...)
+	defer p.Close()
+
+	req, err := http.NewRequest("GET", p.URL, nil)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	for n, v := range check {
+		req.Header.Set(n, v)
+	}
+
+	req.Close = true
+	rsp, err := new(http.Client).Do(req)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	rsp.Body.Close()
 }

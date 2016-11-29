@@ -100,6 +100,19 @@ func (r *tee) Request(fc filters.FilterContext) {
 	}()
 }
 
+func cloneHeader(h http.Header) http.Header {
+	hc := make(http.Header)
+	for n, hi := range h {
+		hc[n] = make([]string, 0, len(hi))
+		for _, v := range hi {
+			println("cloning")
+			hc[n] = append(hc[n], v)
+		}
+	}
+
+	return hc
+}
+
 // copies requests changes URL and Host in request.
 // If 2nd and 3rd params are given path is also modified by applying regexp
 func cloneRequest(t *tee, req *http.Request) http.Request {
