@@ -42,7 +42,9 @@ const (
 	addressUsage                   = "network address that skipper should listen on"
 	etcdUrlsUsage                  = "urls of nodes in an etcd cluster, storing route definitions"
 	etcdPrefixUsage                = "path prefix for skipper related data in etcd"
-	kubernetesURLUsage             = "kubernetes API base url for the ingress data client; when set, it enables ingress"
+	kubernetesUsage                = "enables skipper to generate routes for ingress resources in kubernetes cluster"
+	kubernetesInClusterUsage       = "specify if skipper is running inside kubernetes cluster"
+	kubernetesURLUsage             = "kubernetes API base URL for the ingress data client; requires kubectl proxy running; omit if kubernetes-in-cluster is set to true"
 	kubernetesHealthcheckUsage     = "automatic healthcheck route for internal IPs with path /kube-system/healthz; valid only with kubernetes-url"
 	innkeeperUrlUsage              = "API endpoint of the Innkeeper service, storing route definitions"
 	innkeeperAuthTokenUsage        = "fixed token for innkeeper authentication"
@@ -60,6 +62,7 @@ const (
 	devModeUsage                   = "enables developer time behavior, like ubuffered routing updates"
 	metricsListenerUsage           = "network address used for exposing the /metrics endpoint. An empty value disables metrics."
 	metricsPrefixUsage             = "allows setting a custom path prefix for metrics export"
+	enableProfileUsage             = "enable profile information on the metrics endpoint with path /pprof"
 	debugGcMetricsUsage            = "enables reporting of the Go garbage collector statistics exported in debug.GCStats"
 	runtimeMetricsUsage            = "enables reporting of the Go runtime statistics exported in runtime and specifically runtime.MemStats"
 	serveRouteMetricsUsage         = "enables reporting total serve time metrics for each route"
@@ -90,6 +93,8 @@ var (
 	proxyPreserveHost         bool
 	idleConnsPerHost          int
 	closeIdleConnsPeriod      string
+	kubernetes                bool
+	kubernetesInCluster       bool
 	kubernetesURL             string
 	kubernetesHealthcheck     bool
 	innkeeperUrl              string
@@ -104,6 +109,7 @@ var (
 	devMode                   bool
 	metricsListener           string
 	metricsPrefix             string
+	enableProfile             bool
 	debugGcMetrics            bool
 	runtimeMetrics            bool
 	serveRouteMetrics         bool
@@ -129,6 +135,8 @@ func init() {
 	flag.IntVar(&idleConnsPerHost, "idle-conns-num", proxy.DefaultIdleConnsPerHost, idleConnsPerHostUsage)
 	flag.StringVar(&closeIdleConnsPeriod, "close-idle-conns-period", strconv.Itoa(int(proxy.DefaultCloseIdleConnsPeriod/time.Second)), closeIdleConnsPeriodUsage)
 	flag.StringVar(&etcdPrefix, "etcd-prefix", defaultEtcdPrefix, etcdPrefixUsage)
+	flag.BoolVar(&kubernetes, "kubernetes", false, kubernetesUsage)
+	flag.BoolVar(&kubernetesInCluster, "kubernetes-in-cluster", false, kubernetesInClusterUsage)
 	flag.StringVar(&kubernetesURL, "kubernetes-url", "", kubernetesURLUsage)
 	flag.BoolVar(&kubernetesHealthcheck, "kubernetes-healthcheck", true, kubernetesHealthcheckUsage)
 	flag.StringVar(&innkeeperUrl, "innkeeper-url", "", innkeeperUrlUsage)
@@ -143,6 +151,7 @@ func init() {
 	flag.BoolVar(&devMode, "dev-mode", false, devModeUsage)
 	flag.StringVar(&metricsListener, "metrics-listener", defaultMetricsListener, metricsListenerUsage)
 	flag.StringVar(&metricsPrefix, "metrics-prefix", defaultMetricsPrefix, metricsPrefixUsage)
+	flag.BoolVar(&enableProfile, "enable-profile", false, enableProfileUsage)
 	flag.BoolVar(&debugGcMetrics, "debug-gc-metrics", false, debugGcMetricsUsage)
 	flag.BoolVar(&runtimeMetrics, "runtime-metrics", defaultRuntimeMetrics, runtimeMetricsUsage)
 	flag.BoolVar(&serveRouteMetrics, "serve-route-metrics", false, serveRouteMetricsUsage)
@@ -206,6 +215,8 @@ func main() {
 		Address:                   address,
 		EtcdUrls:                  eus,
 		EtcdPrefix:                etcdPrefix,
+		Kubernetes:                kubernetes,
+		KubernetesInCluster:       kubernetesInCluster,
 		KubernetesURL:             kubernetesURL,
 		KubernetesHealthcheck:     kubernetesHealthcheck,
 		InnkeeperUrl:              innkeeperUrl,
@@ -223,6 +234,7 @@ func main() {
 		DevMode:                   devMode,
 		MetricsListener:           metricsListener,
 		MetricsPrefix:             metricsPrefix,
+		EnableProfile:             enableProfile,
 		EnableDebugGcMetrics:      debugGcMetrics,
 		EnableRuntimeMetrics:      runtimeMetrics,
 		EnableServeRouteMetrics:   serveRouteMetrics,

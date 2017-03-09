@@ -1,12 +1,24 @@
 package kubernetes
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
+	"io/ioutil"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"regexp"
 	"testing"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/zalando/skipper/eskip"
@@ -429,7 +441,7 @@ func TestIngressData(t *testing.T) {
 					),
 				),
 			),
-			&ingressItem{
+			{
 				Spec: &ingressSpec{
 					Rules: []*rule{
 						testRule(
@@ -451,7 +463,10 @@ func TestIngressData(t *testing.T) {
 		t.Run(ti.msg, func(t *testing.T) {
 			api := newTestAPI(t, ti.services, &ingressList{Items: ti.ingresses})
 			defer api.Close()
-			dc := New(Options{KubernetesURL: api.server.URL})
+			dc, err := New(Options{KubernetesURL: api.server.URL})
+			if err != nil {
+				t.Error(err)
+			}
 
 			r, err := dc.LoadAll()
 			if err != nil {
@@ -469,7 +484,10 @@ func Test(t *testing.T) {
 	defer api.Close()
 
 	t.Run("no services, no ingresses, load empty initial and update", func(t *testing.T) {
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		if r, err := dc.LoadAll(); err != nil || len(r) != 0 {
 			t.Error("failed to load initial")
@@ -482,7 +500,10 @@ func Test(t *testing.T) {
 
 	t.Run("has ingress but no according services, load empty initial and update", func(t *testing.T) {
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		if r, err := dc.LoadAll(); err != nil || len(r) != 0 {
 			t.Error("failed to load initial")
@@ -495,7 +516,10 @@ func Test(t *testing.T) {
 
 	t.Run("has ingress but no according services, service gets created", func(t *testing.T) {
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		if r, err := dc.LoadAll(); err != nil || len(r) != 0 {
 			t.Error("failed to load initial")
@@ -523,7 +547,10 @@ func Test(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 		api.ingresses.Items[2].Spec.Rules[0].Http.Paths[0].Backend.ServicePort = backendPort{"not-existing"}
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -546,7 +573,10 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, receive initial", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -568,9 +598,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, update some of them", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -593,9 +626,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, loose a service", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -619,9 +655,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, delete some ingresses", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -649,9 +688,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, delete some ingress rules", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -675,9 +717,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, add new ones", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -722,9 +767,12 @@ func Test(t *testing.T) {
 	t.Run("has ingresses, mixed insert, update, delete", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
-		_, err := dc.LoadAll()
+		_, err = dc.LoadAll()
 		if err != nil {
 			t.Error("failed to load initial routes", err)
 			return
@@ -783,7 +831,10 @@ func TestHealthcheckInitial(t *testing.T) {
 	defer api.Close()
 
 	t.Run("no healthcheck, empty", func(t *testing.T) {
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -796,7 +847,7 @@ func TestHealthcheckInitial(t *testing.T) {
 	t.Run("no healthcheck", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -808,8 +859,12 @@ func TestHealthcheckInitial(t *testing.T) {
 
 	t.Run("no healthcheck, fail", func(t *testing.T) {
 		api.failNext = true
-		dc := New(Options{KubernetesURL: api.server.URL})
-		_, err := dc.LoadAll()
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
+
+		_, err = dc.LoadAll()
 		if err == nil {
 			t.Error("failed to fail")
 		}
@@ -817,10 +872,13 @@ func TestHealthcheckInitial(t *testing.T) {
 
 	t.Run("use healthceck, empty", func(t *testing.T) {
 		api.ingresses.Items = nil
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -833,10 +891,13 @@ func TestHealthcheckInitial(t *testing.T) {
 	t.Run("use healthcheck", func(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		r, err := dc.LoadAll()
 		if err != nil {
@@ -855,7 +916,10 @@ func TestHealthcheckUpdate(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 		api.failNext = true
@@ -875,10 +939,13 @@ func TestHealthcheckUpdate(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 		api.failNext = true
@@ -898,10 +965,13 @@ func TestHealthcheckUpdate(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 
@@ -920,10 +990,13 @@ func TestHealthcheckUpdate(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 
@@ -950,7 +1023,10 @@ func TestHealthcheckReload(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{KubernetesURL: api.server.URL})
+		dc, err := New(Options{KubernetesURL: api.server.URL})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 		api.failNext = true
@@ -967,10 +1043,13 @@ func TestHealthcheckReload(t *testing.T) {
 		api.services = testServices()
 		api.ingresses.Items = testIngresses()
 
-		dc := New(Options{
+		dc, err := New(Options{
 			KubernetesURL:      api.server.URL,
 			ProvideHealthcheck: true,
 		})
+		if err != nil {
+			t.Error(err)
+		}
 
 		dc.LoadAll()
 
@@ -991,4 +1070,219 @@ func TestHealthcheckReload(t *testing.T) {
 			"kube_namespace1__mega__bar_example_org___test2":      "http://5.6.7.8:8181",
 		})
 	})
+}
+
+func TestCreateRequest(t *testing.T) {
+	var (
+		buf bytes.Buffer
+		req *http.Request
+		err error
+		url string
+	)
+	rc := ioutil.NopCloser(&buf)
+
+	client := &Client{}
+
+	url = "A%"
+	req, err = client.createRequest("GET", url, rc)
+	if err == nil {
+		t.Error("request creation should fail")
+	}
+
+	url = "https://www.example.org"
+	req, err = client.createRequest("GET", url, rc)
+	if err != nil {
+		t.Error(err)
+	}
+
+	req, err = client.createRequest("//", url, rc)
+	if err == nil {
+		t.Error("request creation should fail")
+	}
+
+	client.token = "1234"
+	req, err = client.createRequest("POST", url, rc)
+	if err != nil {
+		t.Error(err)
+	}
+	if req.URL.String() != url {
+		t.Errorf("request creation incorrect url is set")
+	}
+	if req.Header.Get("Authorization") != "Bearer 1234" {
+		t.Errorf("incorrect authorization header set")
+	}
+	if req.Method != "POST" {
+		t.Errorf("incorrect method is set")
+	}
+}
+
+func TestBuildAPIURL(t *testing.T) {
+	var apiURL string
+	var err error
+	o := Options{}
+
+	apiURL, err = buildAPIURL(o)
+	if err != nil {
+		t.Error(err)
+	}
+	if apiURL != defaultKubernetesURL {
+		t.Errorf("unexpected default API URL")
+	}
+
+	o.KubernetesURL = "http://localhost:4040"
+	apiURL, err = buildAPIURL(o)
+	if err != nil {
+		t.Error(err)
+	}
+	if apiURL != o.KubernetesURL {
+		t.Errorf("unexpected kubernetes API server URL")
+	}
+
+	o.KubernetesInCluster = true
+
+	curEnvHostVar, curEnvPortVar := os.Getenv(serviceHostEnvVar), os.Getenv(servicePortEnvVar)
+	defer func(host, port string) {
+		os.Setenv(serviceHostEnvVar, host)
+		os.Setenv(servicePortEnvVar, port)
+	}(curEnvHostVar, curEnvPortVar)
+
+	dummyHost := "10.0.0.2"
+	dummyPort := "8080"
+
+	os.Unsetenv(serviceHostEnvVar)
+	os.Unsetenv(servicePortEnvVar)
+
+	apiURL, err = buildAPIURL(o)
+	if apiURL != "" || err != errAPIServerURLNotFound {
+		t.Error("build API url should fail if env var is missing")
+	}
+
+	os.Setenv(serviceHostEnvVar, dummyHost)
+	apiURL, err = buildAPIURL(o)
+	if apiURL != "" || err != errAPIServerURLNotFound {
+		t.Error("build API url should fail if env var is missing")
+	}
+
+	os.Setenv(servicePortEnvVar, dummyPort)
+	apiURL, err = buildAPIURL(o)
+	if apiURL != "https://10.0.0.2:8080" || err != nil {
+		t.Error("incorrect result of build api url")
+	}
+}
+
+func TestBuildHTTPClient(t *testing.T) {
+	httpClient, err := buildHTTPClient("", false)
+	if err != nil {
+		t.Error(err)
+	}
+	if !reflect.DeepEqual(httpClient, http.DefaultClient) {
+		t.Errorf("should return default client if outside the cluster``")
+	}
+
+	httpClient, err = buildHTTPClient("rumplestilzchen", true)
+	if err == nil {
+		t.Errorf("expected to fail for non-existing file")
+	}
+
+	httpClient, err = buildHTTPClient("kube_test.go", true)
+	if err != errInvalidCertificate {
+		t.Errorf("should return invalid certificate")
+	}
+
+	err = ioutil.WriteFile("ca.empty.crt", []byte(""), 0644)
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.Remove("ca.empty.crt")
+
+	_, err = buildHTTPClient("ca.empty.crt", true)
+	if err != errInvalidCertificate {
+		t.Error("empty certificate is invalid certificate")
+	}
+
+	//create CA file
+	err = ioutil.WriteFile("ca.temp.crt", generateSSCert(), 0644)
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.Remove("ca.temp.crt")
+
+	httpClient, err = buildHTTPClient("ca.temp.crt", true)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func TestReadServiceAccountToken(t *testing.T) {
+	var (
+		token string
+		err   error
+	)
+
+	token, err = readServiceAccountToken("kube_test.go", false)
+	if err != nil {
+		t.Error(err)
+	}
+	if token != "" {
+		t.Errorf("unexpected token: %s", token)
+	}
+
+	token, err = readServiceAccountToken("kube_test.go", true)
+	if err != nil {
+		t.Error(err)
+	}
+	if token == "" {
+		t.Errorf("unexpected token: %s", token)
+	}
+
+	token, err = readServiceAccountToken("rumplestilzchen", true)
+	if err == nil {
+		t.Errorf("expected error for a wrong filename")
+	}
+	if token != "" {
+		t.Errorf("token must be empty")
+	}
+}
+
+// generateSSCert only for testing purposes
+func generateSSCert() []byte {
+	//create root CA
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{Organization: []string{"Yhat, Inc."}},
+		SignatureAlgorithm:    x509.SHA256WithRSA,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour), // valid for an hour
+		BasicConstraintsValid: true,
+	}
+	rootKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	tmpl.IsCA = true
+	tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
+	tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+
+	_, rootCertPEM, _ := CreateCert(tmpl, tmpl, &rootKey.PublicKey, rootKey)
+	return rootCertPEM
+}
+
+func CreateCert(template, parent *x509.Certificate, pub interface{}, parentPriv interface{}) (
+	cert *x509.Certificate, certPEM []byte, err error) {
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, parent, pub, parentPriv)
+	if err != nil {
+		return
+	}
+	// parse the resulting certificate so we can use it again
+	cert, err = x509.ParseCertificate(certDER)
+	if err != nil {
+		return
+	}
+	// PEM encode the certificate (this is a standard TLS encoding)
+	b := pem.Block{Type: "CERTIFICATE", Bytes: certDER}
+	certPEM = pem.EncodeToMemory(&b)
+	return
 }
