@@ -74,6 +74,12 @@ release-minor:
 release-patch:
 	make VERSION=$(NEXT_PATCH) tag push-tags
 
+docker-build:
+	make -C packaging VERSION=$(VERSION) docker-build
+
+docker-push:
+	make -C packaging VERSION=$(VERSION) docker-push
+
 ci-user:
 	git config --global user.email "builds@travis-ci.com"
 	git config --global user.name "Travis CI"
