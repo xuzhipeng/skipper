@@ -1,9 +1,9 @@
 .PHONY: docker-push
 
-VERSION ?=    $(shell git rev-parse HEAD)
-REGISTRY ?=   registry-write.opensource.zalan.do/pathfinder
-IMAGE ?=      $(REGISTRY)skipper:$(VERSION)
 COMMIT_HASH = $(shell git rev-parse --short HEAD)
+VERSION ?=    $(COMMIT_HASH)
+REGISTRY ?=   registry-write.opensource.zalan.do/pathfinder
+IMAGE ?=      $(REGISTRY)/skipper:$(VERSION)
 
 default: docker-build
 
