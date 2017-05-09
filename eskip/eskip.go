@@ -14,16 +14,17 @@
 
 package eskip
 
-//go:generate go tool yacc -o parser.go -p eskip parser.y
+//go:generate goyacc -o parser.go -p eskip parser.y
 
 import (
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/zalando/skipper/filters/flowid"
 	"regexp"
 	"strings"
+
+	"github.com/zalando/skipper/filters/flowid"
 )
 
 const duplicateHeaderPredicateErrorFmt = "duplicate header predicate: %s"
@@ -33,17 +34,26 @@ var (
 	invalidPredicateArgCountError   = errors.New("invalid predicate count arg")
 	duplicatePathTreePredicateError = errors.New("duplicate path tree predicate")
 	duplicateMethodPredicateError   = errors.New("duplicate method predicate")
+	invalidBackendErr               = errors.New("invalid backend")
 )
 
 // Represents a matcher condition for incoming requests.
 type matcher struct {
-
 	// The name of the matcher, e.g. Path or Header
 	name string
 
 	// The args of the matcher, e.g. the path to be matched.
 	args []interface{}
 }
+
+type BackendType int
+
+const (
+	InvalidBackend = iota
+	ForwardingBackend
+	ShuntBackend
+	LoopBackend
+)
 
 // Route definition used during the parser processes the raw routing
 // document.
@@ -52,13 +62,13 @@ type parsedRoute struct {
 	matchers []*matcher
 	filters  []*Filter
 	shunt    bool
+	loopback bool
 	backend  string
 }
 
 // A Predicate object represents a parsed, in-memory, route matching predicate
 // that is defined by extensions.
 type Predicate struct {
-
 	// The name of the custom predicate as referenced
 	// in the route definition. E.g. 'Foo'.
 	Name string `json:"name"`
@@ -72,7 +82,6 @@ type Predicate struct {
 
 // A Filter object represents a parsed, in-memory filter expression.
 type Filter struct {
-
 	// name of the filter specification
 	Name string `json:"name"`
 
@@ -82,7 +91,6 @@ type Filter struct {
 
 // A Route object represents a parsed, in-memory route definition.
 type Route struct {
-
 	// Id of the route definition.
 	// E.g. route1: ...
 	Id string
@@ -125,6 +133,10 @@ type Route struct {
 	// (<shunt>, no forwarding to a backend)
 	Shunt bool
 
+	// Indicates that the parsed route is a shunt, loopback or
+	// it is forwarding to a backend.
+	BackendType BackendType
+
 	// The address of a backend for a parsed route.
 	// E.g. "https://www.example.org"
 	Backend string
@@ -135,7 +147,6 @@ type RoutePredicate func(*Route) bool
 // RouteInfo contains a route id, plus the loaded and parsed route or
 // the parse error in case of failure.
 type RouteInfo struct {
-
 	// The route id plus the route data or if parsing was successful.
 	Route
 
@@ -246,9 +257,27 @@ func newRouteDefinition(r *parsedRoute) (*Route, error) {
 	rd.Shunt = r.shunt
 	rd.Backend = r.backend
 
+	rd.BackendType = backendType(r.shunt, r.loopback)
+	if rd.BackendType == InvalidBackend {
+		return nil, invalidBackendErr
+	}
+
 	err := applyPredicates(rd, r)
 
 	return rd, err
+}
+
+func backendType(shunt, loopback bool) BackendType {
+	if shunt && loopback {
+		return InvalidBackend
+	}
+	if shunt {
+		return ShuntBackend
+	}
+	if loopback {
+		return LoopBackend
+	}
+	return ForwardingBackend
 }
 
 // executes the parser.

@@ -16,8 +16,9 @@ package eskip_test
 
 import (
 	"fmt"
-	"github.com/zalando/skipper/eskip"
 	"log"
+
+	"github.com/zalando/skipper/eskip"
 )
 
 func Example() {
@@ -38,12 +39,15 @@ func Example() {
 
 		// route definition with a shunt (no backend address)
 		route2: Path("/some/other/path") -> static("/", "/var/www") -> <shunt>;
-		
+
 		// route definition directing requests to an api endpoint
 		route3:
 			Method("POST") && Path("/api") ->
 			requestHeader("X-Type", "ajax-post") ->
-			"https://api.example.org"
+			"https://api.example.org";
+
+		// route definition with a loopback (no backend address)
+		route4: Path("/some/other/path") -> static("/", "/var/www") -> <loopback>;
 		`
 
 	routes, err := eskip.Parse(code)
@@ -52,18 +56,19 @@ func Example() {
 		return
 	}
 
-	format := "%v: [match] -> [%v filter(s) ->] <%v> \"%v\"\n"
+	format := "%v: [match] -> [%v filter(s) ->] <%v> <%v> \"%v\"\n"
 	fmt.Println("Parsed routes:")
 	for _, r := range routes {
-		fmt.Printf(format, r.Id, len(r.Filters), r.Shunt, r.Backend)
+		fmt.Printf(format, r.Id, len(r.Filters), r.Shunt, r.BackendType, r.Backend)
 	}
 
 	// output:
 	// Parsed routes:
-	// route0: [match] -> [2 filter(s) ->] <false> "https://render.example.org"
-	// route1: [match] -> [0 filter(s) ->] <false> "https://backend-0.example.org"
-	// route2: [match] -> [1 filter(s) ->] <true> ""
-	// route3: [match] -> [1 filter(s) ->] <false> "https://api.example.org"
+	// route0: [match] -> [2 filter(s) ->] <false> <1> "https://render.example.org"
+	// route1: [match] -> [0 filter(s) ->] <false> <1> "https://backend-0.example.org"
+	// route2: [match] -> [1 filter(s) ->] <true> <2> ""
+	// route3: [match] -> [1 filter(s) ->] <false> <1> "https://api.example.org"
+	// route4: [match] -> [1 filter(s) ->] <false> <3> ""
 }
 
 func ExampleFilter() {
@@ -90,7 +95,7 @@ func ExampleFilter() {
 	// filter arg 1: 3.14
 }
 
-func ExampleRoute() {
+func ExampleForwardingRoute() {
 	code := `
 		ajaxRouteV3: PathRegexp(/^\/api\/v3\/.*/) -> ajaxHeader("v3") -> "https://api.example.org"`
 
@@ -107,6 +112,7 @@ func ExampleRoute() {
 	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
 	fmt.Printf("# of filters: %v\n", len(r.Filters))
 	fmt.Printf("is shunt: %v\n", r.Shunt)
+	fmt.Printf("backend type: %v\n", r.BackendType)
 	fmt.Printf("backend address: \"%v\"\n", r.Backend)
 
 	// output:
@@ -115,7 +121,68 @@ func ExampleRoute() {
 	// match regexp: ^/api/v3/.*
 	// # of filters: 1
 	// is shunt: false
+	// backend type: 1
 	// backend address: "https://api.example.org"
+}
+
+func ExampleLoopbackRoute() {
+	code := `
+		ajaxRouteV3: PathRegexp(/^\/api\/v3\/.*/) -> ajaxHeader("v3") -> <loopback>`
+
+	routes, err := eskip.Parse(code)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	r := routes[0]
+
+	fmt.Println("Parsed a route:")
+	fmt.Printf("id: %v\n", r.Id)
+	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
+	fmt.Printf("# of filters: %v\n", len(r.Filters))
+	fmt.Printf("is shunt: %v\n", r.Shunt)
+	fmt.Printf("backend type: %v\n", r.BackendType)
+	fmt.Printf("backend address: \"%v\"\n", r.Backend)
+
+	// output:
+	// Parsed a route:
+	// id: ajaxRouteV3
+	// match regexp: ^/api/v3/.*
+	// # of filters: 1
+	// is shunt: false
+	// backend type: 3
+	// backend address: ""
+}
+
+func ExampleShuntRoute() {
+	code := `
+		ajaxRouteV3: PathRegexp(/^\/api\/v3\/.*/) -> ajaxHeader("v3") -> <shunt>`
+
+	routes, err := eskip.Parse(code)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	r := routes[0]
+
+	fmt.Println("Parsed a route:")
+	fmt.Printf("id: %v\n", r.Id)
+	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
+	fmt.Printf("# of filters: %v\n", len(r.Filters))
+	fmt.Printf("is shunt: %v\n", r.Shunt)
+	fmt.Printf("backend type: %v\n", r.BackendType)
+	fmt.Printf("backend address: \"%v\"\n", r.Backend)
+
+	// output:
+	// Parsed a route:
+	// id: ajaxRouteV3
+	// match regexp: ^/api/v3/.*
+	// # of filters: 1
+	// is shunt: true
+	// backend type: 2
+	// backend address: ""
 }
 
 func ExampleParse() {
