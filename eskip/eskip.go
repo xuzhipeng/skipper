@@ -49,8 +49,7 @@ type matcher struct {
 type BackendType int
 
 const (
-	InvalidBackend = iota
-	ForwardingBackend
+	NetworkBackend = iota
 	ShuntBackend
 	LoopBackend
 )
@@ -131,10 +130,11 @@ type Route struct {
 
 	// Indicates that the parsed route has a shunt backend.
 	// (<shunt>, no forwarding to a backend)
+	// Deprecated, use the BackendType field instead.
 	Shunt bool
 
 	// Indicates that the parsed route is a shunt, loopback or
-	// it is forwarding to a backend.
+	// it is forwarding to a network backend.
 	BackendType BackendType
 
 	// The address of a backend for a parsed route.
@@ -152,6 +152,19 @@ type RouteInfo struct {
 
 	// The parsing error if the parsing failed.
 	ParseError error
+}
+
+func (t BackendType) String() string {
+	switch t {
+	case NetworkBackend:
+		return "network"
+	case ShuntBackend:
+		return "shunt"
+	case LoopBackend:
+		return "loopback"
+	default:
+		return "unknown"
+	}
 }
 
 // Expects exactly n arguments of type string, or fails.
@@ -257,27 +270,32 @@ func newRouteDefinition(r *parsedRoute) (*Route, error) {
 	rd.Shunt = r.shunt
 	rd.Backend = r.backend
 
-	rd.BackendType = backendType(r.shunt, r.loopback)
-	if rd.BackendType == InvalidBackend {
-		return nil, invalidBackendErr
+	bt, err := backendType(r.shunt, r.loopback)
+	if err != nil {
+		return nil, err
 	}
 
-	err := applyPredicates(rd, r)
+	rd.BackendType = bt
+
+	err = applyPredicates(rd, r)
 
 	return rd, err
 }
 
-func backendType(shunt, loopback bool) BackendType {
+func backendType(shunt, loopback bool) (bt BackendType, err error) {
 	if shunt && loopback {
-		return InvalidBackend
+		err = invalidBackendErr
+		return
 	}
 	if shunt {
-		return ShuntBackend
+		bt = ShuntBackend
+	} else if loopback {
+		bt = LoopBackend
+	} else {
+		bt = NetworkBackend
 	}
-	if loopback {
-		return LoopBackend
-	}
-	return ForwardingBackend
+
+	return
 }
 
 // executes the parser.

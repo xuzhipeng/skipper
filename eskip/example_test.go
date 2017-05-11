@@ -56,19 +56,22 @@ func Example() {
 		return
 	}
 
-	format := "%v: [match] -> [%v filter(s) ->] <%v> <%v> \"%v\"\n"
+	format := "%v: [match] -> [%v filter(s) ->] <%v> \"%v\"\n"
 	fmt.Println("Parsed routes:")
 	for _, r := range routes {
-		fmt.Printf(format, r.Id, len(r.Filters), r.Shunt, r.BackendType, r.Backend)
+		fmt.Printf(format, r.Id, len(r.Filters), r.BackendType, r.Backend)
 	}
 
 	// output:
 	// Parsed routes:
-	// route0: [match] -> [2 filter(s) ->] <false> <1> "https://render.example.org"
-	// route1: [match] -> [0 filter(s) ->] <false> <1> "https://backend-0.example.org"
-	// route2: [match] -> [1 filter(s) ->] <true> <2> ""
-	// route3: [match] -> [1 filter(s) ->] <false> <1> "https://api.example.org"
-	// route4: [match] -> [1 filter(s) ->] <false> <3> ""
+	// route0: [match] -> [2 filter(s) ->] <network> "https://render.example.org"
+	// route1: [match] -> [0 filter(s) ->] <network> "https://backend-0.example.org"
+	// route2: [match] -> [1 filter(s) ->] <shunt> ""
+	// route3: [match] -> [1 filter(s) ->] <network> "https://api.example.org"
+	// route4: [match] -> [1 filter(s) ->] <loopback> ""
+
+	// TODO: try to represent this compressed output in a nicer way. This is is now somewhat confusing
+	// considering that it looks almost like eskip but it isn't.
 }
 
 func ExampleFilter() {
@@ -95,7 +98,7 @@ func ExampleFilter() {
 	// filter arg 1: 3.14
 }
 
-func ExampleForwardingRoute() {
+func ExampleNetworkRoute() {
 	code := `
 		ajaxRouteV3: PathRegexp(/^\/api\/v3\/.*/) -> ajaxHeader("v3") -> "https://api.example.org"`
 
@@ -111,7 +114,6 @@ func ExampleForwardingRoute() {
 	fmt.Printf("id: %v\n", r.Id)
 	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
 	fmt.Printf("# of filters: %v\n", len(r.Filters))
-	fmt.Printf("is shunt: %v\n", r.Shunt)
 	fmt.Printf("backend type: %v\n", r.BackendType)
 	fmt.Printf("backend address: \"%v\"\n", r.Backend)
 
@@ -120,8 +122,7 @@ func ExampleForwardingRoute() {
 	// id: ajaxRouteV3
 	// match regexp: ^/api/v3/.*
 	// # of filters: 1
-	// is shunt: false
-	// backend type: 1
+	// backend type: network
 	// backend address: "https://api.example.org"
 }
 
@@ -141,7 +142,6 @@ func ExampleLoopbackRoute() {
 	fmt.Printf("id: %v\n", r.Id)
 	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
 	fmt.Printf("# of filters: %v\n", len(r.Filters))
-	fmt.Printf("is shunt: %v\n", r.Shunt)
 	fmt.Printf("backend type: %v\n", r.BackendType)
 	fmt.Printf("backend address: \"%v\"\n", r.Backend)
 
@@ -150,8 +150,7 @@ func ExampleLoopbackRoute() {
 	// id: ajaxRouteV3
 	// match regexp: ^/api/v3/.*
 	// # of filters: 1
-	// is shunt: false
-	// backend type: 3
+	// backend type: loopback
 	// backend address: ""
 }
 
@@ -171,7 +170,6 @@ func ExampleShuntRoute() {
 	fmt.Printf("id: %v\n", r.Id)
 	fmt.Printf("match regexp: %s\n", r.PathRegexps[0])
 	fmt.Printf("# of filters: %v\n", len(r.Filters))
-	fmt.Printf("is shunt: %v\n", r.Shunt)
 	fmt.Printf("backend type: %v\n", r.BackendType)
 	fmt.Printf("backend address: \"%v\"\n", r.Backend)
 
@@ -180,8 +178,7 @@ func ExampleShuntRoute() {
 	// id: ajaxRouteV3
 	// match regexp: ^/api/v3/.*
 	// # of filters: 1
-	// is shunt: true
-	// backend type: 2
+	// backend type: shunt
 	// backend address: ""
 }
 
