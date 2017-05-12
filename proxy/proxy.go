@@ -597,7 +597,6 @@ func (p *Proxy) do(ctx *filterContext) error {
 	ctx.incLoopCounter()
 	defer ctx.decLoopCounter()
 
-	println("lookup", ctx.request.Header.Get("X-Loop-Route"))
 	route, params := p.lookupRoute(ctx.request)
 	if route == nil {
 		ctx.ensureDefaultResponse()
@@ -613,7 +612,6 @@ func (p *Proxy) do(ctx *filterContext) error {
 	} else if route.Shunt || route.BackendType == eskip.ShuntBackend {
 		ctx.ensureDefaultResponse()
 	} else if route.BackendType == eskip.LoopBackend {
-		println("looping", ctx.request.Header.Get("X-Loop-Route"))
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
 			return err
