@@ -607,7 +607,6 @@ func (p *Proxy) do(ctx *filterContext) error {
 	}
 
 	ctx.applyRoute(ctx.request, route, params, p.flags.PreserveHost())
-
 	processedFilters := p.applyFiltersToRequest(route.Filters, ctx)
 
 	if ctx.shuntedByFilters() {
