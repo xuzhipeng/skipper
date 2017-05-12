@@ -109,7 +109,7 @@ func (r *Route) backendString() string {
 	case r.Shunt && r.BackendType == NetworkBackend, r.BackendType == ShuntBackend:
 		return "<shunt>"
 	case r.BackendType == LoopBackend:
-		return "<loopback"
+		return "<loopback>"
 	default:
 		return r.Backend
 	}

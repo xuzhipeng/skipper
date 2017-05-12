@@ -5,8 +5,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-
 	"testing"
+
+	"github.com/zalando/skipper/filters/builtin"
 )
 
 func testLoopback(
@@ -16,13 +17,41 @@ func testLoopback(
 	expectedStatus int,
 	expectedHeader http.Header,
 ) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var backend *httptest.Server
+	backend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if params.Flags.PreserveOriginal() {
+			if r.Header.Get("X-Test-Preserved") != "test-value" {
+				t.Error("failed to preserve original request")
+				return
+			}
+
+			w.Header().Set("X-Test", "test-value")
+		}
+
+		if params.Flags.PreserveHost() && r.Host != "www.example.org" {
+			t.Error("failed to preserve host")
+		} else if !params.Flags.PreserveHost() {
+			u, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+
+			if r.Host != u.Host {
+				t.Error("failed to set host")
+				return
+			}
+		}
+
 		w.Header().Set("X-Backend-Done", "true")
 	}))
 
 	routes = strings.Replace(routes, "$backend", backend.URL, -1)
 
-	p, err := newTestProxyWithFiltersAndParams(nil, routes, params)
+	fr := builtin.MakeRegistry()
+	fr.Register(&preserveOriginalSpec{})
+
+	p, err := newTestProxyWithFiltersAndParams(fr, routes, params)
 	if err != nil {
 		t.Error(err)
 		return
@@ -39,8 +68,13 @@ func testLoopback(
 	r := &http.Request{
 		URL:    u,
 		Method: "GET",
-		Header: make(http.Header),
+		Header: http.Header{
+			"X-Test": []string{"test-value"},
+			"Host":   []string{"www.example.org"},
+		},
+		Host: "www.example.org",
 	}
+
 	w := httptest.NewRecorder()
 
 	p.proxy.ServeHTTP(w, r)
@@ -72,6 +106,10 @@ func testLoopback(
 				return
 			}
 		}
+	}
+
+	if params.Flags.PreserveOriginal() && w.Header().Get("X-Test-Preserved") != "test-value" {
+		t.Error("failed to preserve original response")
 	}
 }
 
@@ -147,7 +185,7 @@ func TestLoopbackReachLimit(t *testing.T) {
 	var done []string
 	times(3, func() { done = append(done, "1") })
 
-	testLoopback(t, routes, Params{MaxLoopbacks: 3}, http.StatusNotFound, http.Header{
+	testLoopback(t, routes, Params{MaxLoopbacks: 3}, http.StatusInternalServerError, http.Header{
 		"X-Entry-Route-Done": []string{"true"},
 		"X-Loop-Route-Done":  done,
 	})
@@ -168,8 +206,55 @@ func TestLoopbackReachDefaultLimit(t *testing.T) {
 	var done []string
 	times(DefaultMaxLoopbacks, func() { done = append(done, "1") })
 
-	testLoopback(t, routes, Params{}, http.StatusNotFound, http.Header{
+	testLoopback(t, routes, Params{}, http.StatusInternalServerError, http.Header{
 		"X-Entry-Route-Done": []string{"true"},
 		"X-Loop-Route-Done":  done,
+	})
+}
+
+func TestLoopbackPreserveOriginalRequest(t *testing.T) {
+	routes := `
+		entry: *
+			-> appendResponseHeader("X-Entry-Route-Done", "true")
+			-> setRequestHeader("X-Loop-Route", "1")
+			-> preserveOriginal()
+			-> <loopback>;
+
+		loopRoute1: Header("X-Loop-Route", "1")
+			-> appendResponseHeader("X-Loop-Route-Done", "1")
+			-> setRequestHeader("X-Loop-Route", "2")
+			-> <loopback>;
+
+		loopRoute2: Header("X-Loop-Route", "2")
+			-> appendResponseHeader("X-Loop-Route-Done", "2")
+			-> "$backend";
+	`
+
+	testLoopback(t, routes, Params{Flags: PreserveOriginal}, http.StatusOK, http.Header{
+		"X-Entry-Route-Done": []string{"true"},
+		"X-Loop-Route-Done":  []string{"1", "2"},
+	})
+}
+
+func TestLoopbackPreserveHost(t *testing.T) {
+	routes := `
+		entry: *
+			-> appendResponseHeader("X-Entry-Route-Done", "true")
+			-> setRequestHeader("X-Loop-Route", "1")
+			-> <loopback>;
+
+		loopRoute1: Header("X-Loop-Route", "1")
+			-> appendResponseHeader("X-Loop-Route-Done", "1")
+			-> setRequestHeader("X-Loop-Route", "2")
+			-> <loopback>;
+
+		loopRoute2: Header("X-Loop-Route", "2")
+			-> appendResponseHeader("X-Loop-Route-Done", "2")
+			-> "$backend";
+	`
+
+	testLoopback(t, routes, Params{Flags: PreserveHost}, http.StatusOK, http.Header{
+		"X-Entry-Route-Done": []string{"true"},
+		"X-Loop-Route-Done":  []string{"1", "2"},
 	})
 }

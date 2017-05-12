@@ -413,10 +413,12 @@ func mergeParams(to, from map[string]string) map[string]string {
 	return to
 }
 
-func (c *filterContext) applyRoute(r *routing.Route, params map[string]string, preserveHost bool) {
-	c.backendURL = r.Backend
-	if !preserveHost {
-		c.outgoingHost = r.Host
+func (c *filterContext) applyRoute(req *http.Request, route *routing.Route, params map[string]string, preserveHost bool) {
+	c.backendURL = route.Backend
+	if preserveHost {
+		c.outgoingHost = req.Host
+	} else {
+		c.outgoingHost = route.Host
 	}
 
 	c.pathParams = mergeParams(c.pathParams, params)
@@ -591,6 +593,7 @@ func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) err
 func (p *Proxy) do(ctx *filterContext) error {
 	if ctx.loopCounter > p.maxLoops {
 		ctx.ensureDefaultResponse()
+		ctx.response.StatusCode = http.StatusInternalServerError
 		return nil
 	}
 
@@ -603,7 +606,7 @@ func (p *Proxy) do(ctx *filterContext) error {
 		return nil
 	}
 
-	ctx.applyRoute(route, params, p.flags.PreserveHost())
+	ctx.applyRoute(ctx.request, route, params, p.flags.PreserveHost())
 
 	processedFilters := p.applyFiltersToRequest(route.Filters, ctx)
 
