@@ -25,6 +25,8 @@ const (
 	proxyErrorFmt   = "proxy: %s"
 	unknownRouteId  = "_unknownroute_"
 
+	DefaultMaxLoopbacks = 9
+
 	// The default value set for http.Transport.MaxIdleConnsPerHost.
 	DefaultIdleConnsPerHost = 64
 
@@ -103,6 +105,8 @@ type Params struct {
 
 	// Enable the expiremental upgrade protocol feature
 	ExperimentalUpgrade bool
+
+	MaxLoopbacks int
 }
 
 // When set, the proxy will skip the TLS verification on outgoing requests.
@@ -250,22 +254,22 @@ func New(r *routing.Routing, options Options, pr ...PriorityRoute) *Proxy {
 }
 
 // Creates a proxy with the provided parameters.
-func WithParams(o Params) *Proxy {
-	if o.IdleConnectionsPerHost <= 0 {
-		o.IdleConnectionsPerHost = DefaultIdleConnsPerHost
+func WithParams(p Params) *Proxy {
+	if p.IdleConnectionsPerHost <= 0 {
+		p.IdleConnectionsPerHost = DefaultIdleConnsPerHost
 	}
 
-	if o.CloseIdleConnsPeriod == 0 {
-		o.CloseIdleConnsPeriod = DefaultCloseIdleConnsPeriod
+	if p.CloseIdleConnsPeriod == 0 {
+		p.CloseIdleConnsPeriod = DefaultCloseIdleConnsPeriod
 	}
 
-	tr := &http.Transport{MaxIdleConnsPerHost: o.IdleConnectionsPerHost}
+	tr := &http.Transport{MaxIdleConnsPerHost: p.IdleConnectionsPerHost}
 	quit := make(chan struct{})
-	if o.CloseIdleConnsPeriod > 0 {
+	if p.CloseIdleConnsPeriod > 0 {
 		go func() {
 			for {
 				select {
-				case <-time.After(o.CloseIdleConnsPeriod):
+				case <-time.After(p.CloseIdleConnsPeriod):
 					tr.CloseIdleConnections()
 				case <-quit:
 					return
@@ -274,24 +278,30 @@ func WithParams(o Params) *Proxy {
 		}()
 	}
 
-	if o.Flags.Insecure() {
+	if p.Flags.Insecure() {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
 	m := metrics.Default
-	if o.Flags.Debug() {
+	if p.Flags.Debug() {
 		m = metrics.Void
 	}
 
+	if p.MaxLoopbacks == 0 {
+		p.MaxLoopbacks = DefaultMaxLoopbacks
+	}
+
 	return &Proxy{
-		routing:             o.Routing,
+		routing:             p.Routing,
 		roundTripper:        tr,
-		priorityRoutes:      o.PriorityRoutes,
-		flags:               o.Flags,
+		priorityRoutes:      p.PriorityRoutes,
+		flags:               p.Flags,
 		metrics:             m,
 		quit:                quit,
-		flushInterval:       o.FlushInterval,
-		experimentalUpgrade: o.ExperimentalUpgrade}
+		flushInterval:       p.FlushInterval,
+		experimentalUpgrade: p.ExperimentalUpgrade,
+		maxLoops:            p.MaxLoopbacks,
+	}
 }
 
 // calls a function with recovering from panics and logging them
@@ -587,6 +597,7 @@ func (p *Proxy) do(ctx *filterContext) error {
 	ctx.incLoopCounter()
 	defer ctx.decLoopCounter()
 
+	println("lookup", ctx.request.Header.Get("X-Loop-Route"))
 	route, params := p.lookupRoute(ctx.request)
 	if route == nil {
 		ctx.ensureDefaultResponse()
@@ -602,6 +613,7 @@ func (p *Proxy) do(ctx *filterContext) error {
 	} else if route.Shunt || route.BackendType == eskip.ShuntBackend {
 		ctx.ensureDefaultResponse()
 	} else if route.BackendType == eskip.LoopBackend {
+		println("looping", ctx.request.Header.Get("X-Loop-Route"))
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
 			return err
