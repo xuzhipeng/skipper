@@ -109,6 +109,11 @@ type Params struct {
 	MaxLoopbacks int
 }
 
+var (
+	errProxyCanceled   = errors.New("proxy canceled")
+	errMaxLoopsReached = errors.New("max loops reached")
+)
+
 // When set, the proxy will skip the TLS verification on outgoing requests.
 func (f Flags) Insecure() bool { return f&Insecure != 0 }
 
@@ -471,7 +476,7 @@ func (c *filterContext) shuntedByFilters() bool {
 }
 
 func (c *filterContext) shouldServeResponse() bool {
-	return c.loopCounter == 0 && !c.deprecatedServed
+	return !c.deprecatedServed
 }
 
 // applies all filters to a request
@@ -558,8 +563,6 @@ func (p *Proxy) makeUpgradeRequest(ctx *filterContext, route *routing.Route, req
 
 }
 
-var errProxyCanceled = errors.New("proxy canceled")
-
 func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) error {
 	req, err := mapRequest(ctx.request, route, ctx.outgoingHost)
 	if err != nil {
@@ -593,8 +596,7 @@ func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) err
 func (p *Proxy) do(ctx *filterContext) error {
 	if ctx.loopCounter > p.maxLoops {
 		ctx.ensureDefaultResponse()
-		ctx.response.StatusCode = http.StatusInternalServerError
-		return nil
+		return errMaxLoopsReached
 	}
 
 	ctx.incLoopCounter()
@@ -616,6 +618,12 @@ func (p *Proxy) do(ctx *filterContext) error {
 	} else if route.BackendType == eskip.LoopBackend {
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
+			if err == errMaxLoopsReached {
+				log.Error("max loops reached: ", route.Id)
+				sendError(ctx.responseWriter, http.StatusInternalServerError)
+				return errProxyCanceled
+			}
+
 			return err
 		}
 
