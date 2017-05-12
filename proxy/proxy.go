@@ -1,23 +1,10 @@
-// Copyright 2015 Zalando SE
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package proxy
 
 import (
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +14,7 @@ import (
 	"time"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/filters"
 	"github.com/zalando/skipper/metrics"
 	"github.com/zalando/skipper/routing"
@@ -162,20 +150,22 @@ type Proxy struct {
 	quit                chan struct{}
 	flushInterval       time.Duration
 	experimentalUpgrade bool
+	maxLoops            int
 }
 
 type filterContext struct {
-	w                  http.ResponseWriter
-	req                *http.Request
-	res                *http.Response
-	served             bool
+	responseWriter     http.ResponseWriter
+	request            *http.Request
+	response           *http.Response
+	deprecatedServed   bool
 	servedWithResponse bool // to support the deprecated way independently
 	pathParams         map[string]string
 	stateBag           map[string]interface{}
 	originalRequest    *http.Request
 	originalResponse   *http.Response
-	backendUrl         string
+	backendURL         string
 	outgoingHost       string
+	loopCounter        int
 }
 
 func (sb bodyBuffer) Close() error {
@@ -315,30 +305,30 @@ func tryCatch(p func(), onErr func(err interface{})) {
 	p()
 }
 
-func (p *Proxy) newFilterContext(
+func newContext(
 	w http.ResponseWriter,
 	r *http.Request,
-	params map[string]string,
-	route *routing.Route) *filterContext {
+	preserveOriginal bool,
+) *filterContext {
 
 	c := &filterContext{
-		w:          w,
-		req:        r,
-		pathParams: params,
-		stateBag:   make(map[string]interface{}),
-		backendUrl: route.Backend}
+		responseWriter: w,
+		request:        r,
+		stateBag:       make(map[string]interface{}),
+		outgoingHost:   r.Host,
+	}
 
-	if p.flags.PreserveOriginal() {
+	if preserveOriginal {
 		c.originalRequest = cloneRequestMetadata(r)
 	}
 
-	if p.flags.PreserveHost() {
-		c.outgoingHost = r.Host
-	} else {
-		c.outgoingHost = route.Host
-	}
-
 	return c
+}
+
+func (c *filterContext) clone() *filterContext {
+	var cc filterContext
+	cc = *c
+	return &cc
 }
 
 func cloneUrl(u *url.URL) *url.URL {
@@ -380,53 +370,111 @@ func cloneResponseMetadata(r *http.Response) *http.Response {
 		TLS:              r.TLS}
 }
 
-func (c *filterContext) ResponseWriter() http.ResponseWriter { return c.w }
-func (c *filterContext) Request() *http.Request              { return c.req }
-func (c *filterContext) Response() *http.Response            { return c.res }
-func (c *filterContext) MarkServed()                         { c.served = true }
-func (c *filterContext) Served() bool                        { return c.served || c.servedWithResponse }
+func (c *filterContext) ResponseWriter() http.ResponseWriter { return c.responseWriter }
+func (c *filterContext) Request() *http.Request              { return c.request }
+func (c *filterContext) Response() *http.Response            { return c.response }
+func (c *filterContext) MarkServed()                         { c.deprecatedServed = true }
+func (c *filterContext) Served() bool                        { return c.deprecatedServed || c.servedWithResponse }
 func (c *filterContext) PathParam(key string) string         { return c.pathParams[key] }
 func (c *filterContext) StateBag() map[string]interface{}    { return c.stateBag }
-func (c *filterContext) BackendUrl() string                  { return c.backendUrl }
+func (c *filterContext) BackendUrl() string                  { return c.backendURL }
 func (c *filterContext) OriginalRequest() *http.Request      { return c.originalRequest }
 func (c *filterContext) OriginalResponse() *http.Response    { return c.originalResponse }
 func (c *filterContext) OutgoingHost() string                { return c.outgoingHost }
 func (c *filterContext) SetOutgoingHost(h string)            { c.outgoingHost = h }
 
-func (c *filterContext) Serve(res *http.Response) {
-	res.Request = c.Request()
-
-	if res.Header == nil {
-		res.Header = make(http.Header)
-	}
-
-	if res.Body == nil {
-		res.Body = &bodyBuffer{&bytes.Buffer{}}
-	}
-
-	c.servedWithResponse = true
-	c.res = res
+func (c *filterContext) incLoopCounter() {
+	c.loopCounter++
 }
 
-// creates an empty shunt response with the initial status code of 404
-func shunt(r *http.Request) *http.Response {
+func (c *filterContext) decLoopCounter() {
+	c.loopCounter--
+}
+
+func mergeParams(to, from map[string]string) map[string]string {
+	if to == nil {
+		to = make(map[string]string)
+	}
+
+	for k, v := range from {
+		to[k] = v
+	}
+
+	return to
+}
+
+func (c *filterContext) applyRoute(r *routing.Route, params map[string]string, preserveHost bool) {
+	c.backendURL = r.Backend
+	if !preserveHost {
+		c.outgoingHost = r.Host
+	}
+
+	c.pathParams = mergeParams(c.pathParams, params)
+}
+
+func defaultBody() io.ReadCloser {
+	return &bodyBuffer{&bytes.Buffer{}}
+}
+
+func defaultResponse(r *http.Request) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusNotFound,
 		Header:     make(http.Header),
-		Body:       &bodyBuffer{&bytes.Buffer{}},
+		Body:       defaultBody(),
 		Request:    r}
 }
 
+func (c *filterContext) Serve(r *http.Response) {
+	r.Request = c.Request()
+
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
+
+	if r.Body == nil {
+		r.Body = defaultBody()
+	}
+
+	c.servedWithResponse = true
+	c.response = r
+}
+
+func (c *filterContext) ensureDefaultResponse() {
+	if c.response == nil {
+		c.response = defaultResponse(c.request)
+		return
+	}
+
+	if c.response.Header == nil {
+		c.response.Header = make(http.Header)
+	}
+
+	if c.response.Body == nil {
+		c.response.Body = defaultBody()
+	}
+}
+
+func (c *filterContext) shuntedByFilters() bool {
+	return c.deprecatedServed || c.servedWithResponse
+}
+
+func (c *filterContext) shouldServeResponse() bool {
+	return c.loopCounter == 0 && !c.deprecatedServed
+}
+
 // applies all filters to a request
-func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *filterContext, onErr func(err interface{})) []*routing.RouteFilter {
+func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *filterContext) []*routing.RouteFilter {
 	var start time.Time
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
 		start = time.Now()
-		tryCatch(func() { fi.Request(ctx) }, onErr)
+		tryCatch(func() { fi.Request(ctx) }, func(err interface{}) {
+			log.Error("error while processing filters during request:", err)
+		})
+
 		p.metrics.MeasureFilterRequest(fi.Name, start)
 		filters = append(filters, fi)
-		if ctx.served || ctx.servedWithResponse {
+		if ctx.deprecatedServed || ctx.servedWithResponse {
 			break
 		}
 	}
@@ -434,13 +482,16 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *filterConte
 }
 
 // applies filters to a response in reverse order
-func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx filters.FilterContext, onErr func(err interface{})) {
+func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx filters.FilterContext) {
 	count := len(filters)
 	var start time.Time
 	for i, _ := range filters {
 		fi := filters[count-1-i]
 		start = time.Now()
-		tryCatch(func() { fi.Response(ctx) }, onErr)
+		tryCatch(func() { fi.Response(ctx) }, func(err interface{}) {
+			log.Error("error while processing filters during response:", err)
+		})
+
 		p.metrics.MeasureFilterResponse(fi.Name, start)
 	}
 }
@@ -463,176 +514,146 @@ func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[stri
 }
 
 // send a premature error response
-func sendError(w http.ResponseWriter, error string, code int) {
-	http.Error(w, error, code)
+func sendError(w http.ResponseWriter, code int) {
+	http.Error(w, http.StatusText(code), code)
 	addBranding(w.Header())
+}
+
+// TODO: verify where should the errors be hooked. Changing it should be a separate refactoring item.
+
+// TODO: rename filterContext to context, store the route on the context
+
+func (p *Proxy) makeUpgradeRequest(ctx *filterContext, route *routing.Route, req *http.Request) {
+	// have to parse url again, because path is not be copied by mapRequest
+	backendURL, err := url.Parse(route.Backend)
+	if err != nil {
+		log.Errorf("can not parse backend %s, caused by: %s", route.Backend, err)
+		sendError(ctx.responseWriter, http.StatusBadGateway)
+		return
+	}
+
+	reverseProxy := httputil.NewSingleHostReverseProxy(backendURL)
+	reverseProxy.FlushInterval = p.flushInterval
+	upgradeProxy := upgradeProxy{
+		backendAddr:     backendURL,
+		reverseProxy:    reverseProxy,
+		insecure:        p.flags.Insecure(),
+		tlsClientConfig: p.roundTripper.TLSClientConfig,
+	}
+
+	upgradeProxy.serveHTTP(ctx.responseWriter, req)
+	log.Debugf("Finished upgraded protocol %s session", getUpgradeRequest(ctx.request))
+
+}
+
+var errProxyCanceled = errors.New("proxy canceled")
+
+func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) error {
+	req, err := mapRequest(ctx.request, route, ctx.outgoingHost)
+	if err != nil {
+		log.Errorf("could not map backend request, caused by: %v", err)
+		sendError(ctx.responseWriter, http.StatusInternalServerError)
+		return errProxyCanceled
+	}
+
+	if p.experimentalUpgrade && isUpgradeRequest(req) {
+		p.makeUpgradeRequest(ctx, route, req)
+		// We are not owner of the connection anymore.
+		return errProxyCanceled
+	}
+
+	response, err := p.roundTripper.RoundTrip(req)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if _, ok := err.(net.Error); ok {
+			code = http.StatusServiceUnavailable
+		}
+
+		sendError(ctx.responseWriter, code)
+		log.Error("error during backend roundtrip: ", err)
+		return errProxyCanceled
+	}
+
+	ctx.response = response
+	return nil
+}
+
+func (p *Proxy) do(ctx *filterContext) error {
+	if ctx.loopCounter > p.maxLoops {
+		ctx.ensureDefaultResponse()
+		return nil
+	}
+
+	ctx.incLoopCounter()
+	defer ctx.decLoopCounter()
+
+	route, params := p.lookupRoute(ctx.request)
+	if route == nil {
+		ctx.ensureDefaultResponse()
+		return nil
+	}
+
+	ctx.applyRoute(route, params, p.flags.PreserveHost())
+
+	processedFilters := p.applyFiltersToRequest(route.Filters, ctx)
+
+	if ctx.shuntedByFilters() {
+		ctx.ensureDefaultResponse()
+	} else if route.Shunt || route.BackendType == eskip.ShuntBackend {
+		ctx.ensureDefaultResponse()
+	} else if route.BackendType == eskip.LoopBackend {
+		loopCTX := ctx.clone()
+		if err := p.do(loopCTX); err != nil {
+			return err
+		}
+
+		ctx.response = loopCTX.response
+	} else {
+		if err := p.makeBackendRequest(ctx, route); err != nil {
+			return err
+		}
+	}
+
+	if ctx.deprecatedServed {
+		return nil
+	}
+
+	if p.flags.PreserveOriginal() {
+		ctx.originalResponse = cloneResponseMetadata(ctx.response)
+	}
+
+	p.applyFiltersToResponse(processedFilters, ctx)
+	return nil
+}
+
+func (p *Proxy) serveResponse(ctx *filterContext) {
+	addBranding(ctx.response.Header)
+	copyHeader(ctx.responseWriter.Header(), ctx.response.Header)
+	ctx.responseWriter.WriteHeader(ctx.response.StatusCode)
+	err := copyStream(ctx.responseWriter.(flusherWriter), ctx.response.Body)
+	if err != nil {
+		log.Error("error while copying the response stream", err)
+	}
 }
 
 // http.Handler implementation
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	startServe := time.Now()
+	ctx := newContext(w, r, p.flags.PreserveOriginal())
+	err := p.do(ctx)
 
-	start := startServe
-	rt, params := p.lookupRoute(r)
-	if rt == nil {
-		if p.flags.Debug() {
-			dbgResponse(w, &debugInfo{
-				incoming: r,
-				response: &http.Response{StatusCode: http.StatusNotFound}})
-			return
+	defer func() {
+		if ctx.response != nil && ctx.response.Body != nil {
+			ctx.response.Body.Close()
 		}
+	}()
 
-		p.metrics.IncRoutingFailures()
-		sendError(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-		p.metrics.MeasureServe(unknownRouteId, r.Host, r.Method, http.StatusNotFound, startServe)
-		log.Debugf("Could not find a route for %v", r.URL)
-		return
-	}
-
-	p.metrics.MeasureRouteLookup(start)
-
-	start = time.Now()
-	routeFilters := rt.Filters
-	c := p.newFilterContext(w, r, params, rt)
-
-	var (
-		onErr        func(err interface{})
-		filterPanics []interface{}
-	)
-	if p.flags.Debug() {
-		onErr = func(err interface{}) {
-			filterPanics = append(filterPanics, err)
+	if err != nil {
+		if err != errProxyCanceled {
+			log.Error("error while proxying: ", err)
 		}
-	} else {
-		onErr = func(err interface{}) {
-			log.Error("filter", err)
-		}
+	} else if ctx.shouldServeResponse() {
+		p.serveResponse(ctx)
 	}
-
-	processedFilters := p.applyFiltersToRequest(routeFilters, c, onErr)
-	p.metrics.MeasureAllFiltersRequest(rt.Id, start)
-
-	var debugReq *http.Request
-	if !c.served && !c.servedWithResponse {
-		var (
-			rs  *http.Response
-			err error
-		)
-
-		start = time.Now()
-		if rt.Shunt {
-			rs = shunt(r)
-		} else if p.flags.Debug() {
-			debugReq, err = mapRequest(r, rt, c.outgoingHost)
-			if err != nil {
-				dbgResponse(w, &debugInfo{
-					route:        &rt.Route,
-					incoming:     c.OriginalRequest(),
-					response:     &http.Response{StatusCode: http.StatusInternalServerError},
-					err:          err,
-					filterPanics: filterPanics})
-				return
-			}
-
-			rs = &http.Response{Header: make(http.Header)}
-		} else {
-
-			rr, err := mapRequest(r, rt, c.outgoingHost)
-			if err != nil {
-				log.Errorf("Could not mapRequest, caused by: %v", err)
-				sendError(w,
-					http.StatusText(http.StatusInternalServerError),
-					http.StatusInternalServerError)
-				p.metrics.MeasureServe(rt.Id, r.Host, r.Method, http.StatusInternalServerError, startServe)
-				return
-			}
-
-			if p.experimentalUpgrade && isUpgradeRequest(rr) {
-				// have to parse url again, because path is not be copied by mapRequest
-				backendURL, err := url.Parse(rt.Backend)
-				if err != nil {
-					log.Errorf("Can not parse backend %s, caused by: %s", rt.Backend, err)
-					sendError(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-					return
-				}
-
-				reverseProxy := httputil.NewSingleHostReverseProxy(backendURL)
-				reverseProxy.FlushInterval = p.flushInterval
-				upgradeProxy := upgradeProxy{
-					backendAddr:     backendURL,
-					reverseProxy:    reverseProxy,
-					insecure:        p.flags.Insecure(),
-					tlsClientConfig: p.roundTripper.TLSClientConfig,
-				}
-				upgradeProxy.serveHTTP(w, rr)
-				log.Debugf("Finished upgraded protocol %s session", getUpgradeRequest(r))
-				// We are not owner of the connection anymore.
-				return
-			}
-
-			rs, err = p.roundTripper.RoundTrip(rr)
-
-			if err != nil {
-				p.metrics.IncErrorsBackend(rt.Id)
-				code := http.StatusInternalServerError
-				if _, ok := err.(net.Error); ok {
-					code = http.StatusServiceUnavailable
-				}
-
-				sendError(w, http.StatusText(code), code)
-				p.metrics.MeasureServe(rt.Id, r.Host, r.Method, code, startServe)
-				log.Error("error during backend roundtrip: ", err)
-				return
-			}
-		}
-
-		p.metrics.MeasureBackend(rt.Id, start)
-		p.metrics.MeasureBackendHost(rt.Host, start)
-		c.res = rs
-	}
-
-	start = time.Now()
-	if !c.served && p.flags.PreserveOriginal() {
-		c.originalResponse = cloneResponseMetadata(c.Response())
-	}
-	p.applyFiltersToResponse(processedFilters, c, onErr)
-	p.metrics.MeasureAllFiltersResponse(rt.Id, start)
-
-	if c.res.Body != nil {
-		defer func(body io.Closer) {
-			err := body.Close()
-			if err != nil {
-				log.Error("error during closing the response body", err)
-			}
-		}(c.res.Body)
-	}
-
-	if !c.served {
-		if p.flags.Debug() {
-			dbgResponse(w, &debugInfo{
-				route:        &rt.Route,
-				incoming:     c.OriginalRequest(),
-				outgoing:     debugReq,
-				response:     c.Response(),
-				filterPanics: filterPanics})
-			return
-		}
-
-		response := c.Response()
-		start = time.Now()
-		addBranding(response.Header)
-		copyHeader(w.Header(), response.Header)
-		w.WriteHeader(response.StatusCode)
-		err := copyStream(w.(flusherWriter), response.Body)
-		if err != nil {
-			p.metrics.IncErrorsStreaming(rt.Id)
-			log.Error("error while copying the response stream", err)
-		} else {
-			p.metrics.MeasureResponse(response.StatusCode, r.Method, rt.Id, start)
-		}
-	}
-
-	p.metrics.MeasureServe(rt.Id, r.Host, r.Method, c.Response().StatusCode, startServe)
 }
 
 // Close causes the proxy to stop closing idle
