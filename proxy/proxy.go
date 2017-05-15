@@ -319,13 +319,20 @@ func WithParams(p Params) *Proxy {
 }
 
 // applies all filters to a request
-func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context, onErr func(interface{})) []*routing.RouteFilter {
+func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []*routing.RouteFilter {
 	filtersStart := time.Now()
 
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
 		start := time.Now()
-		tryCatch(func() { fi.Request(ctx) }, onErr)
+		tryCatch(func() { fi.Request(ctx) }, func(err interface{}) {
+			if p.flags.Debug() {
+				ctx.debugFilterPanics = append(ctx.debugFilterPanics, err)
+				return
+			}
+
+			log.Error("error while processing filters during request: ", err)
+		})
 
 		p.metrics.MeasureFilterRequest(fi.Name, start)
 		filters = append(filters, fi)
@@ -339,14 +346,22 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context, on
 }
 
 // applies filters to a response in reverse order
-func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *context, onErr func(interface{})) {
+func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *context) {
 	filtersStart := time.Now()
 
 	count := len(filters)
 	for i, _ := range filters {
 		fi := filters[count-1-i]
 		start := time.Now()
-		tryCatch(func() { fi.Response(ctx) }, onErr)
+		tryCatch(func() { fi.Response(ctx) }, func(err interface{}) {
+			if p.flags.Debug() {
+				ctx.debugFilterPanics = append(ctx.debugFilterPanics, err)
+				return
+			}
+
+			log.Error("error while processing filters during response: ", err)
+		})
+
 		p.metrics.MeasureFilterResponse(fi.Name, start)
 	}
 
@@ -429,6 +444,15 @@ func (p *Proxy) do(ctx *context) error {
 	lookupStart := time.Now()
 	route, params := p.lookupRoute(ctx.request)
 	if route == nil {
+		if p.flags.Debug() {
+			dbgResponse(ctx.responseWriter, &debugInfo{
+				incoming: ctx.request,
+				response: &http.Response{StatusCode: http.StatusNotFound},
+			})
+
+			return errProxyCanceled
+		}
+
 		p.metrics.IncRoutingFailures()
 		p.sendError(ctx, http.StatusNotFound)
 		log.Debugf("could not find a route for %v", ctx.request.URL)
@@ -438,18 +462,7 @@ func (p *Proxy) do(ctx *context) error {
 	ctx.applyRoute(route, params, p.flags.PreserveHost())
 	p.metrics.MeasureRouteLookup(lookupStart)
 
-	var filterPanics []interface{}
-	onErr := func(err interface{}) {
-		log.Error("error while processing filters during request: ", err)
-	}
-
-	if p.flags.Debug() {
-		onErr = func(err interface{}) {
-			filterPanics = append(filterPanics)
-		}
-	}
-
-	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx, onErr)
+	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx)
 
 	if ctx.deprecatedShunted() {
 		return errProxyCanceled
@@ -462,6 +475,22 @@ func (p *Proxy) do(ctx *context) error {
 		}
 
 		ctx.setResponse(loopCTX.response, p.flags.PreserveOriginal())
+	} else if p.flags.Debug() {
+		debugReq, err := mapRequest(ctx.request, ctx.route, ctx.outgoingHost)
+		if err != nil {
+			dbgResponse(ctx.responseWriter, &debugInfo{
+				route:        &ctx.route.Route,
+				incoming:     ctx.OriginalRequest(),
+				response:     &http.Response{StatusCode: http.StatusInternalServerError},
+				err:          err,
+				filterPanics: ctx.debugFilterPanics,
+			})
+
+			return errProxyCanceled
+		}
+
+		ctx.outgoingDebugRequest = debugReq
+		ctx.setResponse(&http.Response{Header: make(http.Header)}, p.flags.PreserveOriginal())
 	} else {
 		backendStart := time.Now()
 		rsp, err := p.makeBackendRequest(ctx)
@@ -475,11 +504,23 @@ func (p *Proxy) do(ctx *context) error {
 		p.metrics.MeasureBackendHost(ctx.route.Host, backendStart)
 	}
 
-	p.applyFiltersToResponse(processedFilters, ctx, onErr)
+	p.applyFiltersToResponse(processedFilters, ctx)
 	return nil
 }
 
 func (p *Proxy) serveResponse(ctx *context) {
+	if p.flags.Debug() {
+		dbgResponse(ctx.responseWriter, &debugInfo{
+			route:        &ctx.route.Route,
+			incoming:     ctx.OriginalRequest(),
+			outgoing:     ctx.outgoingDebugRequest,
+			response:     ctx.response,
+			filterPanics: ctx.debugFilterPanics,
+		})
+
+		return
+	}
+
 	start := time.Now()
 	addBranding(ctx.response.Header)
 	copyHeader(ctx.responseWriter.Header(), ctx.response.Header)

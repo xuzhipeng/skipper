@@ -17,19 +17,22 @@ type bodyBuffer struct {
 }
 
 type context struct {
-	responseWriter     http.ResponseWriter
-	request            *http.Request
-	response           *http.Response
-	route              *routing.Route
-	deprecatedServed   bool
-	servedWithResponse bool // to support the deprecated way independently
-	pathParams         map[string]string
-	stateBag           map[string]interface{}
-	originalRequest    *http.Request
-	originalResponse   *http.Response
-	outgoingHost       string
-	loopCounter        int
-	startServe         time.Time
+	responseWriter        http.ResponseWriter
+	request               *http.Request
+	response              *http.Response
+	route                 *routing.Route
+	deprecatedServed      bool
+	servedWithResponse    bool // to support the deprecated way independently
+	pathParams            map[string]string
+	stateBag              map[string]interface{}
+	originalRequest       *http.Request
+	originalResponse      *http.Response
+	outgoingHost          string
+	debugFilterPanics     []interface{}
+	outgoingDebugRequest  *http.Request
+	incomingDebugResponse *http.Response
+	loopCounter           int
+	startServe            time.Time
 }
 
 func defaultBody() io.ReadCloser {
