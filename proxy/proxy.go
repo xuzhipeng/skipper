@@ -135,7 +135,7 @@ type Proxy struct {
 	maxLoops            int
 }
 
-var errProxyCanceled   = errors.New("proxy canceled")
+var errProxyCanceled = errors.New("proxy canceled")
 
 // When set, the proxy will skip the TLS verification on outgoing requests.
 func (f Flags) Insecure() bool { return f&Insecure != 0 }
@@ -319,15 +319,13 @@ func WithParams(p Params) *Proxy {
 }
 
 // applies all filters to a request
-func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []*routing.RouteFilter {
+func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context, onErr func(interface{})) []*routing.RouteFilter {
 	filtersStart := time.Now()
 
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
 		start := time.Now()
-		tryCatch(func() { fi.Request(ctx) }, func(err interface{}) {
-			log.Error("error while processing filters during request:", err)
-		})
+		tryCatch(func() { fi.Request(ctx) }, onErr)
 
 		p.metrics.MeasureFilterRequest(fi.Name, start)
 		filters = append(filters, fi)
@@ -341,17 +339,14 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []
 }
 
 // applies filters to a response in reverse order
-func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *context) {
+func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *context, onErr func(interface{})) {
 	filtersStart := time.Now()
 
 	count := len(filters)
 	for i, _ := range filters {
 		fi := filters[count-1-i]
 		start := time.Now()
-		tryCatch(func() { fi.Response(ctx) }, func(err interface{}) {
-			log.Error("error while processing filters during response:", err)
-		})
-
+		tryCatch(func() { fi.Response(ctx) }, onErr)
 		p.metrics.MeasureFilterResponse(fi.Name, start)
 	}
 
@@ -436,14 +431,25 @@ func (p *Proxy) do(ctx *context) error {
 	if route == nil {
 		p.metrics.IncRoutingFailures()
 		p.sendError(ctx, http.StatusNotFound)
-		log.Debugf("Could not find a route for %v", ctx.request.URL)
+		log.Debugf("could not find a route for %v", ctx.request.URL)
 		return errProxyCanceled
 	}
 
 	ctx.applyRoute(route, params, p.flags.PreserveHost())
 	p.metrics.MeasureRouteLookup(lookupStart)
 
-	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx)
+	var filterPanics []interface{}
+	onErr := func(err interface{}) {
+		log.Error("error while processing filters during request: ", err)
+	}
+
+	if p.flags.Debug() {
+		onErr = func(err interface{}) {
+			filterPanics = append(filterPanics)
+		}
+	}
+
+	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx, onErr)
 
 	if ctx.deprecatedShunted() {
 		return errProxyCanceled
@@ -469,7 +475,7 @@ func (p *Proxy) do(ctx *context) error {
 		p.metrics.MeasureBackendHost(ctx.route.Host, backendStart)
 	}
 
-	p.applyFiltersToResponse(processedFilters, ctx)
+	p.applyFiltersToResponse(processedFilters, ctx, onErr)
 	return nil
 }
 
@@ -495,7 +501,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if ctx.response != nil && ctx.response.Body != nil {
-			ctx.response.Body.Close()
+			err := ctx.response.Body.Close()
+			if err != nil {
+				log.Error("error during closing the response body", err)
+			}
 		}
 	}()
 
