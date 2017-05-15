@@ -13,7 +13,6 @@ import (
 	"time"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/zalando/skipper/filters"
 	"github.com/zalando/skipper/metrics"
 	"github.com/zalando/skipper/routing"
 )
@@ -136,10 +135,7 @@ type Proxy struct {
 	maxLoops            int
 }
 
-var (
-	errProxyCanceled   = errors.New("proxy canceled")
-	errMaxLoopsReached = errors.New("max loops reached")
-)
+var errProxyCanceled   = errors.New("proxy canceled")
 
 // When set, the proxy will skip the TLS verification on outgoing requests.
 func (f Flags) Insecure() bool { return f&Insecure != 0 }
@@ -171,10 +167,27 @@ func tryCatch(p func(), onErr func(err interface{})) {
 	p()
 }
 
-// send a premature error response
-func sendError(w http.ResponseWriter, code int) {
-	http.Error(w, http.StatusText(code), code)
+func sendHTTPError(w http.ResponseWriter, code int) {
 	addBranding(w.Header())
+	http.Error(w, http.StatusText(code), code)
+}
+
+// send a premature error response
+func (p *Proxy) sendError(c *context, code int) {
+	sendHTTPError(c.responseWriter, code)
+
+	id := unknownRouteId
+	if c.route != nil {
+		id = c.route.Id
+	}
+
+	p.metrics.MeasureServe(
+		id,
+		c.request.Host,
+		c.request.Method,
+		code,
+		c.startServe,
+	)
 }
 
 func copyHeader(to, from http.Header) {
@@ -307,10 +320,11 @@ func WithParams(p Params) *Proxy {
 
 // applies all filters to a request
 func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []*routing.RouteFilter {
-	var start time.Time
+	filtersStart := time.Now()
+
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
-		start = time.Now()
+		start := time.Now()
 		tryCatch(func() { fi.Request(ctx) }, func(err interface{}) {
 			log.Error("error while processing filters during request:", err)
 		})
@@ -321,22 +335,27 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []
 			break
 		}
 	}
+
+	p.metrics.MeasureAllFiltersRequest(ctx.route.Id, filtersStart)
 	return filters
 }
 
 // applies filters to a response in reverse order
-func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx filters.FilterContext) {
+func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *context) {
+	filtersStart := time.Now()
+
 	count := len(filters)
-	var start time.Time
 	for i, _ := range filters {
 		fi := filters[count-1-i]
-		start = time.Now()
+		start := time.Now()
 		tryCatch(func() { fi.Response(ctx) }, func(err interface{}) {
 			log.Error("error while processing filters during response:", err)
 		})
 
 		p.metrics.MeasureFilterResponse(fi.Name, start)
 	}
+
+	p.metrics.MeasureAllFiltersResponse(ctx.route.Id, filtersStart)
 }
 
 func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[string]string) {
@@ -355,7 +374,7 @@ func (p *Proxy) makeUpgradeRequest(ctx *context, route *routing.Route, req *http
 	backendURL, err := url.Parse(route.Backend)
 	if err != nil {
 		log.Errorf("can not parse backend %s, caused by: %s", route.Backend, err)
-		sendError(ctx.responseWriter, http.StatusBadGateway)
+		sendHTTPError(ctx.responseWriter, http.StatusBadGateway)
 		return
 	}
 
@@ -369,20 +388,20 @@ func (p *Proxy) makeUpgradeRequest(ctx *context, route *routing.Route, req *http
 	}
 
 	upgradeProxy.serveHTTP(ctx.responseWriter, req)
-	log.Debugf("Finished upgraded protocol %s session", getUpgradeRequest(ctx.request))
+	log.Debugf("finished upgraded protocol %s session", getUpgradeRequest(ctx.request))
 
 }
 
-func (p *Proxy) makeBackendRequest(ctx *context, route *routing.Route) (*http.Response, error) {
-	req, err := mapRequest(ctx.request, route, ctx.outgoingHost)
+func (p *Proxy) makeBackendRequest(ctx *context) (*http.Response, error) {
+	req, err := mapRequest(ctx.request, ctx.route, ctx.outgoingHost)
 	if err != nil {
 		log.Errorf("could not map backend request, caused by: %v", err)
-		sendError(ctx.responseWriter, http.StatusInternalServerError)
+		p.sendError(ctx, http.StatusInternalServerError)
 		return nil, errProxyCanceled
 	}
 
 	if p.experimentalUpgrade && isUpgradeRequest(req) {
-		p.makeUpgradeRequest(ctx, route, req)
+		p.makeUpgradeRequest(ctx, ctx.route, req)
 		// We are not owner of the connection anymore.
 		return nil, errProxyCanceled
 	}
@@ -394,7 +413,7 @@ func (p *Proxy) makeBackendRequest(ctx *context, route *routing.Route) (*http.Re
 			code = http.StatusServiceUnavailable
 		}
 
-		sendError(ctx.responseWriter, code)
+		p.sendError(ctx, code)
 		log.Error("error during backend roundtrip: ", err)
 		return nil, errProxyCanceled
 	}
@@ -404,56 +423,50 @@ func (p *Proxy) makeBackendRequest(ctx *context, route *routing.Route) (*http.Re
 
 func (p *Proxy) do(ctx *context) error {
 	if ctx.loopCounter > p.maxLoops {
-		ctx.ensureDefaultResponse()
-		return errMaxLoopsReached
+		p.sendError(ctx, http.StatusInternalServerError)
+		log.Error("max loops reached: ", ctx.route.Id)
+		return errProxyCanceled
 	}
 
 	ctx.incLoopCounter()
 	defer ctx.decLoopCounter()
 
+	lookupStart := time.Now()
 	route, params := p.lookupRoute(ctx.request)
 	if route == nil {
 		p.metrics.IncRoutingFailures()
-		sendError(ctx.responseWriter, http.StatusNotFound)
-		p.metrics.MeasureServe(
-			unknownRouteId,
-			ctx.request.Host,
-			ctx.request.Method,
-			http.StatusNotFound,
-			ctx.startServe,
-		)
+		p.sendError(ctx, http.StatusNotFound)
 		log.Debugf("Could not find a route for %v", ctx.request.URL)
 		return errProxyCanceled
 	}
 
 	ctx.applyRoute(route, params, p.flags.PreserveHost())
-	processedFilters := p.applyFiltersToRequest(route.Filters, ctx)
+	p.metrics.MeasureRouteLookup(lookupStart)
+
+	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx)
 
 	if ctx.deprecatedShunted() {
-		ctx.ensureDefaultResponse()
-		return nil
+		return errProxyCanceled
 	} else if ctx.shunted() || ctx.isShuntRoute() {
 		ctx.ensureDefaultResponse()
 	} else if ctx.isLoopbackRoute() {
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
-			if err == errMaxLoopsReached {
-				log.Error("max loops reached: ", route.Id)
-				sendError(ctx.responseWriter, http.StatusInternalServerError)
-				return errProxyCanceled
-			}
-
 			return err
 		}
 
 		ctx.setResponse(loopCTX.response, p.flags.PreserveOriginal())
 	} else {
-		rsp, err := p.makeBackendRequest(ctx, route)
+		backendStart := time.Now()
+		rsp, err := p.makeBackendRequest(ctx)
 		if err != nil {
+			p.metrics.IncErrorsBackend(ctx.route.Id)
 			return err
 		}
 
 		ctx.setResponse(rsp, p.flags.PreserveOriginal())
+		p.metrics.MeasureBackend(ctx.route.Id, backendStart)
+		p.metrics.MeasureBackendHost(ctx.route.Host, backendStart)
 	}
 
 	p.applyFiltersToResponse(processedFilters, ctx)
@@ -461,12 +474,16 @@ func (p *Proxy) do(ctx *context) error {
 }
 
 func (p *Proxy) serveResponse(ctx *context) {
+	start := time.Now()
 	addBranding(ctx.response.Header)
 	copyHeader(ctx.responseWriter.Header(), ctx.response.Header)
 	ctx.responseWriter.WriteHeader(ctx.response.StatusCode)
 	err := copyStream(ctx.responseWriter.(flusherWriter), ctx.response.Body)
 	if err != nil {
+		p.metrics.IncErrorsStreaming(ctx.route.Id)
 		log.Error("error while copying the response stream", err)
+	} else {
+		p.metrics.MeasureResponse(ctx.response.StatusCode, ctx.request.Method, ctx.route.Id, start)
 	}
 }
 
@@ -483,12 +500,33 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if err != nil {
-		if err != errProxyCanceled {
-			log.Error("error while proxying: ", err)
+		if err == errProxyCanceled {
+			return
 		}
-	} else if !ctx.deprecatedServed {
-		p.serveResponse(ctx)
+
+		id := unknownRouteId
+		if ctx.route != nil {
+			id = ctx.route.Id
+		}
+
+		code := http.StatusInternalServerError
+		if _, ok := err.(net.Error); ok {
+			code = http.StatusServiceUnavailable
+		}
+
+		log.Errorf("error while proxying, route %s, status code %d: %v", id, code, err)
+		p.metrics.MeasureServe(id, r.Host, r.Method, code, ctx.startServe)
+		return
 	}
+
+	p.serveResponse(ctx)
+	p.metrics.MeasureServe(
+		ctx.route.Id,
+		r.Host,
+		r.Method,
+		ctx.response.StatusCode,
+		ctx.startServe,
+	)
 }
 
 // Close causes the proxy to stop closing idle
