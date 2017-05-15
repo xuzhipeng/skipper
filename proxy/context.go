@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"time"
@@ -10,11 +11,6 @@ import (
 	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/routing"
 )
-
-// a byte buffer implementing the Closer interface
-type bodyBuffer struct {
-	*bytes.Buffer
-}
 
 type context struct {
 	responseWriter        http.ResponseWriter
@@ -36,7 +32,7 @@ type context struct {
 }
 
 func defaultBody() io.ReadCloser {
-	return &bodyBuffer{&bytes.Buffer{}}
+	return ioutil.NopCloser(&bytes.Buffer{})
 }
 
 func defaultResponse(r *http.Request) *http.Response {
@@ -44,14 +40,11 @@ func defaultResponse(r *http.Request) *http.Response {
 		StatusCode: http.StatusNotFound,
 		Header:     make(http.Header),
 		Body:       defaultBody(),
-		Request:    r}
+		Request:    r,
+	}
 }
 
-func (sb bodyBuffer) Close() error {
-	return nil
-}
-
-func cloneUrl(u *url.URL) *url.URL {
+func cloneURL(u *url.URL) *url.URL {
 	uc := *u
 	return &uc
 }
@@ -59,19 +52,20 @@ func cloneUrl(u *url.URL) *url.URL {
 func cloneRequestMetadata(r *http.Request) *http.Request {
 	return &http.Request{
 		Method:           r.Method,
-		URL:              cloneUrl(r.URL),
+		URL:              cloneURL(r.URL),
 		Proto:            r.Proto,
 		ProtoMajor:       r.ProtoMajor,
 		ProtoMinor:       r.ProtoMinor,
 		Header:           cloneHeader(r.Header),
-		Body:             &bodyBuffer{&bytes.Buffer{}},
+		Body:             defaultBody(),
 		ContentLength:    r.ContentLength,
 		TransferEncoding: r.TransferEncoding,
 		Close:            r.Close,
 		Host:             r.Host,
 		RemoteAddr:       r.RemoteAddr,
 		RequestURI:       r.RequestURI,
-		TLS:              r.TLS}
+		TLS:              r.TLS,
+	}
 }
 
 func cloneResponseMetadata(r *http.Response) *http.Response {
@@ -82,14 +76,17 @@ func cloneResponseMetadata(r *http.Response) *http.Response {
 		ProtoMajor:       r.ProtoMajor,
 		ProtoMinor:       r.ProtoMinor,
 		Header:           cloneHeader(r.Header),
-		Body:             &bodyBuffer{&bytes.Buffer{}},
+		Body:             defaultBody(),
 		ContentLength:    r.ContentLength,
 		TransferEncoding: r.TransferEncoding,
 		Close:            r.Close,
 		Request:          r.Request,
-		TLS:              r.TLS}
+		TLS:              r.TLS,
+	}
 }
 
+// this is required during looping to preserve the original set of
+// params in the outer routes
 func mergeParams(to, from map[string]string) map[string]string {
 	if to == nil {
 		to = make(map[string]string)

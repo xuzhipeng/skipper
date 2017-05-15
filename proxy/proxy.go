@@ -106,6 +106,20 @@ type Params struct {
 	MaxLoopbacks int
 }
 
+// When set, the proxy will skip the TLS verification on outgoing requests.
+func (f Flags) Insecure() bool { return f&Insecure != 0 }
+
+// When set, the filters will recieve an unmodified clone of the original
+// incoming request and response.
+func (f Flags) PreserveOriginal() bool { return f&(PreserveOriginal|Debug) != 0 }
+
+// When set, the proxy will set the, by default, the Host header value
+// of the outgoing requests to the one of the incoming request.
+func (f Flags) PreserveHost() bool { return f&PreserveHost != 0 }
+
+// When set, the proxy runs in debug mode.
+func (f Flags) Debug() bool { return f&Debug != 0 }
+
 // Priority routes are custom route implementations that are matched against
 // each request before the routes in the general lookup tree.
 type PriorityRoute interface {
@@ -136,59 +150,6 @@ type Proxy struct {
 }
 
 var errProxyCanceled = errors.New("proxy canceled")
-
-// When set, the proxy will skip the TLS verification on outgoing requests.
-func (f Flags) Insecure() bool { return f&Insecure != 0 }
-
-// When set, the filters will recieve an unmodified clone of the original
-// incoming request and response.
-func (f Flags) PreserveOriginal() bool { return f&(PreserveOriginal|Debug) != 0 }
-
-// When set, the proxy will set the, by default, the Host header value
-// of the outgoing requests to the one of the incoming request.
-func (f Flags) PreserveHost() bool { return f&PreserveHost != 0 }
-
-// When set, the proxy runs in debug mode.
-func (f Flags) Debug() bool { return f&Debug != 0 }
-
-// addBranding overwrites any existing `X-Powered-By` or `Server` header from headerMap
-func addBranding(headerMap http.Header) {
-	headerMap.Set("X-Powered-By", "Skipper")
-	headerMap.Set("Server", "Skipper")
-}
-
-func tryCatch(p func(), onErr func(err interface{})) {
-	defer func() {
-		if err := recover(); err != nil {
-			onErr(err)
-		}
-	}()
-
-	p()
-}
-
-func sendHTTPError(w http.ResponseWriter, code int) {
-	addBranding(w.Header())
-	http.Error(w, http.StatusText(code), code)
-}
-
-// send a premature error response
-func (p *Proxy) sendError(c *context, code int) {
-	sendHTTPError(c.responseWriter, code)
-
-	id := unknownRouteId
-	if c.route != nil {
-		id = c.route.Id
-	}
-
-	p.metrics.MeasureServe(
-		id,
-		c.request.Host,
-		c.request.Method,
-		code,
-		c.startServe,
-	)
-}
 
 func copyHeader(to, from http.Header) {
 	for k, v := range from {
@@ -320,6 +281,16 @@ func WithParams(p Params) *Proxy {
 	}
 }
 
+func tryCatch(p func(), onErr func(err interface{})) {
+	defer func() {
+		if err := recover(); err != nil {
+			onErr(err)
+		}
+	}()
+
+	p()
+}
+
 // applies all filters to a request
 func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []*routing.RouteFilter {
 	filtersStart := time.Now()
@@ -327,16 +298,18 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
 		start := time.Now()
-		tryCatch(func() { fi.Request(ctx) }, func(err interface{}) {
+		tryCatch(func() {
+			fi.Request(ctx)
+			p.metrics.MeasureFilterRequest(fi.Name, start)
+		}, func(err interface{}) {
 			if p.flags.Debug() {
 				ctx.debugFilterPanics = append(ctx.debugFilterPanics, err)
 				return
 			}
 
-			log.Error("error while processing filters during request: ", err)
+			log.Errorf("error while processing filter during request: %s: %v", fi.Name, err)
 		})
 
-		p.metrics.MeasureFilterRequest(fi.Name, start)
 		filters = append(filters, fi)
 		if ctx.deprecatedShunted() || ctx.shunted() {
 			break
@@ -355,19 +328,26 @@ func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx *cont
 	for i, _ := range filters {
 		fi := filters[count-1-i]
 		start := time.Now()
-		tryCatch(func() { fi.Response(ctx) }, func(err interface{}) {
+		tryCatch(func() {
+			fi.Response(ctx)
+			p.metrics.MeasureFilterResponse(fi.Name, start)
+		}, func(err interface{}) {
 			if p.flags.Debug() {
 				ctx.debugFilterPanics = append(ctx.debugFilterPanics, err)
 				return
 			}
 
-			log.Error("error while processing filters during response: ", err)
+			log.Errorf("error while processing filters during response: %s: %v", fi.Name, err)
 		})
-
-		p.metrics.MeasureFilterResponse(fi.Name, start)
 	}
 
 	p.metrics.MeasureAllFiltersResponse(ctx.route.Id, filtersStart)
+}
+
+// addBranding overwrites any existing `X-Powered-By` or `Server` header from headerMap
+func addBranding(headerMap http.Header) {
+	headerMap.Set("X-Powered-By", "Skipper")
+	headerMap.Set("Server", "Skipper")
 }
 
 func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[string]string) {
@@ -379,6 +359,29 @@ func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[stri
 	}
 
 	return p.routing.Route(r)
+}
+
+func sendHTTPError(w http.ResponseWriter, code int) {
+	addBranding(w.Header())
+	http.Error(w, http.StatusText(code), code)
+}
+
+// send a premature error response
+func (p *Proxy) sendError(c *context, code int) {
+	sendHTTPError(c.responseWriter, code)
+
+	id := unknownRouteId
+	if c.route != nil {
+		id = c.route.Id
+	}
+
+	p.metrics.MeasureServe(
+		id,
+		c.request.Host,
+		c.request.Method,
+		code,
+		c.startServe,
+	)
 }
 
 func (p *Proxy) makeUpgradeRequest(ctx *context, route *routing.Route, req *http.Request) {
@@ -401,7 +404,6 @@ func (p *Proxy) makeUpgradeRequest(ctx *context, route *routing.Route, req *http
 
 	upgradeProxy.serveHTTP(ctx.responseWriter, req)
 	log.Debugf("finished upgraded protocol %s session", getUpgradeRequest(ctx.request))
-
 }
 
 func (p *Proxy) makeBackendRequest(ctx *context) (*http.Response, error) {
@@ -445,6 +447,8 @@ func (p *Proxy) do(ctx *context) error {
 
 	lookupStart := time.Now()
 	route, params := p.lookupRoute(ctx.request)
+	p.metrics.MeasureRouteLookup(lookupStart)
+
 	if route == nil {
 		if p.flags.Debug() {
 			dbgResponse(ctx.responseWriter, &debugInfo{
@@ -462,7 +466,6 @@ func (p *Proxy) do(ctx *context) error {
 	}
 
 	ctx.applyRoute(route, params, p.flags.PreserveHost())
-	p.metrics.MeasureRouteLookup(lookupStart)
 
 	processedFilters := p.applyFiltersToRequest(ctx.route.Filters, ctx)
 
