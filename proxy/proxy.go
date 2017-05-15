@@ -303,6 +303,8 @@ func WithParams(p Params) *Proxy {
 
 	if p.MaxLoopbacks == 0 {
 		p.MaxLoopbacks = DefaultMaxLoopbacks
+	} else if p.MaxLoopbacks < 0 {
+		p.MaxLoopbacks = 0
 	}
 
 	return &Proxy{
