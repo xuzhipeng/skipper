@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/filters"
 	"github.com/zalando/skipper/metrics"
 	"github.com/zalando/skipper/routing"
@@ -109,6 +107,35 @@ type Params struct {
 	MaxLoopbacks int
 }
 
+// Priority routes are custom route implementations that are matched against
+// each request before the routes in the general lookup tree.
+type PriorityRoute interface {
+
+	// If the request is matched, returns a route, otherwise nil.
+	// Additionally it may return a parameter map used by the filters
+	// in the route.
+	Match(*http.Request) (*routing.Route, map[string]string)
+}
+
+type flusherWriter interface {
+	http.Flusher
+	io.Writer
+}
+
+// Proxy instances implement Skipper proxying functionality. For
+// initializing, see the WithParams the constructor and Params.
+type Proxy struct {
+	routing             *routing.Routing
+	roundTripper        *http.Transport
+	priorityRoutes      []PriorityRoute
+	flags               Flags
+	metrics             *metrics.Metrics
+	quit                chan struct{}
+	flushInterval       time.Duration
+	experimentalUpgrade bool
+	maxLoops            int
+}
+
 var (
 	errProxyCanceled   = errors.New("proxy canceled")
 	errMaxLoopsReached = errors.New("max loops reached")
@@ -128,57 +155,26 @@ func (f Flags) PreserveHost() bool { return f&PreserveHost != 0 }
 // When set, the proxy runs in debug mode.
 func (f Flags) Debug() bool { return f&Debug != 0 }
 
-// Priority routes are custom route implementations that are matched against
-// each request before the routes in the general lookup tree.
-type PriorityRoute interface {
-
-	// If the request is matched, returns a route, otherwise nil.
-	// Additionally it may return a parameter map used by the filters
-	// in the route.
-	Match(*http.Request) (*routing.Route, map[string]string)
+// addBranding overwrites any existing `X-Powered-By` or `Server` header from headerMap
+func addBranding(headerMap http.Header) {
+	headerMap.Set("X-Powered-By", "Skipper")
+	headerMap.Set("Server", "Skipper")
 }
 
-type flusherWriter interface {
-	http.Flusher
-	io.Writer
+func tryCatch(p func(), onErr func(err interface{})) {
+	defer func() {
+		if err := recover(); err != nil {
+			onErr(err)
+		}
+	}()
+
+	p()
 }
 
-// a byte buffer implementing the Closer interface
-type bodyBuffer struct {
-	*bytes.Buffer
-}
-
-// Proxy instances implement Skipper proxying functionality. For
-// initializing, see the WithParams the constructor and Params.
-type Proxy struct {
-	routing             *routing.Routing
-	roundTripper        *http.Transport
-	priorityRoutes      []PriorityRoute
-	flags               Flags
-	metrics             *metrics.Metrics
-	quit                chan struct{}
-	flushInterval       time.Duration
-	experimentalUpgrade bool
-	maxLoops            int
-}
-
-type filterContext struct {
-	responseWriter     http.ResponseWriter
-	request            *http.Request
-	response           *http.Response
-	deprecatedServed   bool
-	servedWithResponse bool // to support the deprecated way independently
-	pathParams         map[string]string
-	stateBag           map[string]interface{}
-	originalRequest    *http.Request
-	originalResponse   *http.Response
-	backendURL         string
-	outgoingHost       string
-	loopCounter        int
-}
-
-func (sb bodyBuffer) Close() error {
-	return nil
+// send a premature error response
+func sendError(w http.ResponseWriter, code int) {
+	http.Error(w, http.StatusText(code), code)
+	addBranding(w.Header())
 }
 
 func copyHeader(to, from http.Header) {
@@ -309,178 +305,8 @@ func WithParams(p Params) *Proxy {
 	}
 }
 
-// calls a function with recovering from panics and logging them
-func tryCatch(p func(), onErr func(err interface{})) {
-	defer func() {
-		if err := recover(); err != nil {
-			onErr(err)
-		}
-	}()
-
-	p()
-}
-
-func newContext(
-	w http.ResponseWriter,
-	r *http.Request,
-	preserveOriginal bool,
-) *filterContext {
-
-	c := &filterContext{
-		responseWriter: w,
-		request:        r,
-		stateBag:       make(map[string]interface{}),
-		outgoingHost:   r.Host,
-	}
-
-	if preserveOriginal {
-		c.originalRequest = cloneRequestMetadata(r)
-	}
-
-	return c
-}
-
-func (c *filterContext) clone() *filterContext {
-	var cc filterContext
-	cc = *c
-	return &cc
-}
-
-func cloneUrl(u *url.URL) *url.URL {
-	uc := *u
-	return &uc
-}
-
-func cloneRequestMetadata(r *http.Request) *http.Request {
-	return &http.Request{
-		Method:           r.Method,
-		URL:              cloneUrl(r.URL),
-		Proto:            r.Proto,
-		ProtoMajor:       r.ProtoMajor,
-		ProtoMinor:       r.ProtoMinor,
-		Header:           cloneHeader(r.Header),
-		Body:             &bodyBuffer{&bytes.Buffer{}},
-		ContentLength:    r.ContentLength,
-		TransferEncoding: r.TransferEncoding,
-		Close:            r.Close,
-		Host:             r.Host,
-		RemoteAddr:       r.RemoteAddr,
-		RequestURI:       r.RequestURI,
-		TLS:              r.TLS}
-}
-
-func cloneResponseMetadata(r *http.Response) *http.Response {
-	return &http.Response{
-		Status:           r.Status,
-		StatusCode:       r.StatusCode,
-		Proto:            r.Proto,
-		ProtoMajor:       r.ProtoMajor,
-		ProtoMinor:       r.ProtoMinor,
-		Header:           cloneHeader(r.Header),
-		Body:             &bodyBuffer{&bytes.Buffer{}},
-		ContentLength:    r.ContentLength,
-		TransferEncoding: r.TransferEncoding,
-		Close:            r.Close,
-		Request:          r.Request,
-		TLS:              r.TLS}
-}
-
-func (c *filterContext) ResponseWriter() http.ResponseWriter { return c.responseWriter }
-func (c *filterContext) Request() *http.Request              { return c.request }
-func (c *filterContext) Response() *http.Response            { return c.response }
-func (c *filterContext) MarkServed()                         { c.deprecatedServed = true }
-func (c *filterContext) Served() bool                        { return c.deprecatedServed || c.servedWithResponse }
-func (c *filterContext) PathParam(key string) string         { return c.pathParams[key] }
-func (c *filterContext) StateBag() map[string]interface{}    { return c.stateBag }
-func (c *filterContext) BackendUrl() string                  { return c.backendURL }
-func (c *filterContext) OriginalRequest() *http.Request      { return c.originalRequest }
-func (c *filterContext) OriginalResponse() *http.Response    { return c.originalResponse }
-func (c *filterContext) OutgoingHost() string                { return c.outgoingHost }
-func (c *filterContext) SetOutgoingHost(h string)            { c.outgoingHost = h }
-
-func (c *filterContext) incLoopCounter() {
-	c.loopCounter++
-}
-
-func (c *filterContext) decLoopCounter() {
-	c.loopCounter--
-}
-
-func mergeParams(to, from map[string]string) map[string]string {
-	if to == nil {
-		to = make(map[string]string)
-	}
-
-	for k, v := range from {
-		to[k] = v
-	}
-
-	return to
-}
-
-func (c *filterContext) applyRoute(req *http.Request, route *routing.Route, params map[string]string, preserveHost bool) {
-	c.backendURL = route.Backend
-	if preserveHost {
-		c.outgoingHost = req.Host
-	} else {
-		c.outgoingHost = route.Host
-	}
-
-	c.pathParams = mergeParams(c.pathParams, params)
-}
-
-func defaultBody() io.ReadCloser {
-	return &bodyBuffer{&bytes.Buffer{}}
-}
-
-func defaultResponse(r *http.Request) *http.Response {
-	return &http.Response{
-		StatusCode: http.StatusNotFound,
-		Header:     make(http.Header),
-		Body:       defaultBody(),
-		Request:    r}
-}
-
-func (c *filterContext) Serve(r *http.Response) {
-	r.Request = c.Request()
-
-	if r.Header == nil {
-		r.Header = make(http.Header)
-	}
-
-	if r.Body == nil {
-		r.Body = defaultBody()
-	}
-
-	c.servedWithResponse = true
-	c.response = r
-}
-
-func (c *filterContext) ensureDefaultResponse() {
-	if c.response == nil {
-		c.response = defaultResponse(c.request)
-		return
-	}
-
-	if c.response.Header == nil {
-		c.response.Header = make(http.Header)
-	}
-
-	if c.response.Body == nil {
-		c.response.Body = defaultBody()
-	}
-}
-
-func (c *filterContext) shuntedByFilters() bool {
-	return c.deprecatedServed || c.servedWithResponse
-}
-
-func (c *filterContext) shouldServeResponse() bool {
-	return !c.deprecatedServed
-}
-
 // applies all filters to a request
-func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *filterContext) []*routing.RouteFilter {
+func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *context) []*routing.RouteFilter {
 	var start time.Time
 	var filters = make([]*routing.RouteFilter, 0, len(f))
 	for _, fi := range f {
@@ -491,7 +317,7 @@ func (p *Proxy) applyFiltersToRequest(f []*routing.RouteFilter, ctx *filterConte
 
 		p.metrics.MeasureFilterRequest(fi.Name, start)
 		filters = append(filters, fi)
-		if ctx.deprecatedServed || ctx.servedWithResponse {
+		if ctx.deprecatedShunted() || ctx.shunted() {
 			break
 		}
 	}
@@ -513,12 +339,6 @@ func (p *Proxy) applyFiltersToResponse(filters []*routing.RouteFilter, ctx filte
 	}
 }
 
-// addBranding overwrites any existing `X-Powered-By` or `Server` header from headerMap
-func addBranding(headerMap http.Header) {
-	headerMap.Set("X-Powered-By", "Skipper")
-	headerMap.Set("Server", "Skipper")
-}
-
 func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[string]string) {
 	for _, prt := range p.priorityRoutes {
 		rt, params = prt.Match(r)
@@ -530,17 +350,7 @@ func (p *Proxy) lookupRoute(r *http.Request) (rt *routing.Route, params map[stri
 	return p.routing.Route(r)
 }
 
-// send a premature error response
-func sendError(w http.ResponseWriter, code int) {
-	http.Error(w, http.StatusText(code), code)
-	addBranding(w.Header())
-}
-
-// TODO: verify where should the errors be hooked. Changing it should be a separate refactoring item.
-
-// TODO: rename filterContext to context, store the route on the context
-
-func (p *Proxy) makeUpgradeRequest(ctx *filterContext, route *routing.Route, req *http.Request) {
+func (p *Proxy) makeUpgradeRequest(ctx *context, route *routing.Route, req *http.Request) {
 	// have to parse url again, because path is not be copied by mapRequest
 	backendURL, err := url.Parse(route.Backend)
 	if err != nil {
@@ -563,18 +373,18 @@ func (p *Proxy) makeUpgradeRequest(ctx *filterContext, route *routing.Route, req
 
 }
 
-func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) error {
+func (p *Proxy) makeBackendRequest(ctx *context, route *routing.Route) (*http.Response, error) {
 	req, err := mapRequest(ctx.request, route, ctx.outgoingHost)
 	if err != nil {
 		log.Errorf("could not map backend request, caused by: %v", err)
 		sendError(ctx.responseWriter, http.StatusInternalServerError)
-		return errProxyCanceled
+		return nil, errProxyCanceled
 	}
 
 	if p.experimentalUpgrade && isUpgradeRequest(req) {
 		p.makeUpgradeRequest(ctx, route, req)
 		// We are not owner of the connection anymore.
-		return errProxyCanceled
+		return nil, errProxyCanceled
 	}
 
 	response, err := p.roundTripper.RoundTrip(req)
@@ -586,14 +396,13 @@ func (p *Proxy) makeBackendRequest(ctx *filterContext, route *routing.Route) err
 
 		sendError(ctx.responseWriter, code)
 		log.Error("error during backend roundtrip: ", err)
-		return errProxyCanceled
+		return nil, errProxyCanceled
 	}
 
-	ctx.response = response
-	return nil
+	return response, nil
 }
 
-func (p *Proxy) do(ctx *filterContext) error {
+func (p *Proxy) do(ctx *context) error {
 	if ctx.loopCounter > p.maxLoops {
 		ctx.ensureDefaultResponse()
 		return errMaxLoopsReached
@@ -604,18 +413,28 @@ func (p *Proxy) do(ctx *filterContext) error {
 
 	route, params := p.lookupRoute(ctx.request)
 	if route == nil {
-		ctx.ensureDefaultResponse()
-		return nil
+		p.metrics.IncRoutingFailures()
+		sendError(ctx.responseWriter, http.StatusNotFound)
+		p.metrics.MeasureServe(
+			unknownRouteId,
+			ctx.request.Host,
+			ctx.request.Method,
+			http.StatusNotFound,
+			ctx.startServe,
+		)
+		log.Debugf("Could not find a route for %v", ctx.request.URL)
+		return errProxyCanceled
 	}
 
-	ctx.applyRoute(ctx.request, route, params, p.flags.PreserveHost())
+	ctx.applyRoute(route, params, p.flags.PreserveHost())
 	processedFilters := p.applyFiltersToRequest(route.Filters, ctx)
 
-	if ctx.shuntedByFilters() {
+	if ctx.deprecatedShunted() {
 		ctx.ensureDefaultResponse()
-	} else if route.Shunt || route.BackendType == eskip.ShuntBackend {
+		return nil
+	} else if ctx.shunted() || ctx.isShuntRoute() {
 		ctx.ensureDefaultResponse()
-	} else if route.BackendType == eskip.LoopBackend {
+	} else if ctx.isLoopbackRoute() {
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
 			if err == errMaxLoopsReached {
@@ -627,26 +446,21 @@ func (p *Proxy) do(ctx *filterContext) error {
 			return err
 		}
 
-		ctx.response = loopCTX.response
+		ctx.setResponse(loopCTX.response, p.flags.PreserveOriginal())
 	} else {
-		if err := p.makeBackendRequest(ctx, route); err != nil {
+		rsp, err := p.makeBackendRequest(ctx, route)
+		if err != nil {
 			return err
 		}
-	}
 
-	if ctx.deprecatedServed {
-		return nil
-	}
-
-	if p.flags.PreserveOriginal() {
-		ctx.originalResponse = cloneResponseMetadata(ctx.response)
+		ctx.setResponse(rsp, p.flags.PreserveOriginal())
 	}
 
 	p.applyFiltersToResponse(processedFilters, ctx)
 	return nil
 }
 
-func (p *Proxy) serveResponse(ctx *filterContext) {
+func (p *Proxy) serveResponse(ctx *context) {
 	addBranding(ctx.response.Header)
 	copyHeader(ctx.responseWriter.Header(), ctx.response.Header)
 	ctx.responseWriter.WriteHeader(ctx.response.StatusCode)
@@ -659,6 +473,7 @@ func (p *Proxy) serveResponse(ctx *filterContext) {
 // http.Handler implementation
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(w, r, p.flags.PreserveOriginal())
+	ctx.startServe = time.Now()
 	err := p.do(ctx)
 
 	defer func() {
@@ -671,7 +486,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != errProxyCanceled {
 			log.Error("error while proxying: ", err)
 		}
-	} else if ctx.shouldServeResponse() {
+	} else if !ctx.deprecatedServed {
 		p.serveResponse(ctx)
 	}
 }
