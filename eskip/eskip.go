@@ -272,6 +272,7 @@ func backendType(shunt, loopback bool) (bt BackendType, err error) {
 		err = invalidBackendErr
 		return
 	}
+
 	if shunt {
 		bt = ShuntBackend
 	} else if loopback {

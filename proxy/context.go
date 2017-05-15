@@ -87,7 +87,7 @@ func cloneResponseMetadata(r *http.Response) *http.Response {
 
 // this is required during looping to preserve the original set of
 // params in the outer routes
-func mergeParams(to, from map[string]string) map[string]string {
+func appendParams(to, from map[string]string) map[string]string {
 	if to == nil {
 		to = make(map[string]string)
 	}
@@ -130,7 +130,7 @@ func (c *context) applyRoute(route *routing.Route, params map[string]string, pre
 		c.outgoingHost = route.Host
 	}
 
-	c.pathParams = mergeParams(c.pathParams, params)
+	c.pathParams = appendParams(c.pathParams, params)
 }
 
 func (c *context) ensureDefaultResponse() {
@@ -202,5 +202,9 @@ func (c *context) Serve(r *http.Response) {
 func (c *context) clone() *context {
 	var cc context
 	cc = *c
+
+	// preserve the original path params by cloning the set:
+	cc.pathParams = appendParams(nil, c.pathParams)
+
 	return &cc
 }

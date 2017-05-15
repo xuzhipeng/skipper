@@ -349,6 +349,7 @@ func TestLoopbackPathParams(t *testing.T) {
 	routes := `
 		entry: Path("/:param/path")
 			-> appendResponseHeader("X-Entry-Route-Done", "true")
+			-> returnParam() // should add "test"
 			-> setRequestHeader("X-Loop-Route", "1")
 			-> setPath("/")
 			-> <loopback>;
@@ -356,11 +357,12 @@ func TestLoopbackPathParams(t *testing.T) {
 		loopRoute1: Header("X-Loop-Route", "1")
 			-> appendResponseHeader("X-Loop-Route-Done", "1")
 			-> setRequestHeader("X-Loop-Route", "2")
+			-> setPath("/loop-test/path")
 			-> <loopback>;
 
-		loopRoute2: Header("X-Loop-Route", "2")
+		loopRoute2: Path("/:param/path") && Header("X-Loop-Route", "2")
 			-> appendResponseHeader("X-Loop-Route-Done", "2")
-			-> returnParam()
+			-> returnParam() // should add "loop-test"
 			-> "$backend";
 	`
 
@@ -368,7 +370,7 @@ func TestLoopbackPathParams(t *testing.T) {
 		"X-Entry-Route-Done": []string{"true"},
 		"X-Loop-Route-Done":  []string{"1", "2"},
 		"X-Backend-Done":     []string{"true"},
-		"X-Path-Param":       []string{"test"},
+		"X-Path-Param":       []string{"test", "loop-test"},
 	})
 }
 
