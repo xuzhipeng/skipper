@@ -57,6 +57,7 @@ func cloneRequestMetadata(r *http.Request) *http.Request {
 		ProtoMajor:       r.ProtoMajor,
 		ProtoMinor:       r.ProtoMinor,
 		Header:           cloneHeader(r.Header),
+		Trailer:          cloneHeader(r.Trailer),
 		Body:             defaultBody(),
 		ContentLength:    r.ContentLength,
 		TransferEncoding: r.TransferEncoding,
@@ -76,6 +77,7 @@ func cloneResponseMetadata(r *http.Response) *http.Response {
 		ProtoMajor:       r.ProtoMajor,
 		ProtoMinor:       r.ProtoMinor,
 		Header:           cloneHeader(r.Header),
+		Trailer:          cloneHeader(r.Trailer),
 		Body:             defaultBody(),
 		ContentLength:    r.ContentLength,
 		TransferEncoding: r.TransferEncoding,
@@ -200,8 +202,7 @@ func (c *context) Serve(r *http.Response) {
 }
 
 func (c *context) clone() *context {
-	var cc context
-	cc = *c
+	cc := *c
 
 	// preserve the original path params by cloning the set:
 	cc.pathParams = appendParams(nil, c.pathParams)
