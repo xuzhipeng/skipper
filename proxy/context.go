@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/routing"
 )
 
@@ -116,14 +115,6 @@ func newContext(w http.ResponseWriter, r *http.Request, preserveOriginal bool) *
 	return c
 }
 
-func (c *context) incLoopCounter() {
-	c.loopCounter++
-}
-
-func (c *context) decLoopCounter() {
-	c.loopCounter--
-}
-
 func (c *context) applyRoute(route *routing.Route, params map[string]string, preserveHost bool) {
 	c.route = route
 	if preserveHost {
@@ -156,14 +147,6 @@ func (c *context) deprecatedShunted() bool {
 
 func (c *context) shunted() bool {
 	return c.servedWithResponse
-}
-
-func (c *context) isShuntRoute() bool {
-	return c.route.Shunt || c.route.BackendType == eskip.ShuntBackend
-}
-
-func (c *context) isLoopbackRoute() bool {
-	return c.route.BackendType == eskip.LoopBackend
 }
 
 func (c *context) setResponse(r *http.Response, preserveOriginal bool) {

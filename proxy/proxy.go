@@ -13,6 +13,7 @@ import (
 	"time"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/metrics"
 	"github.com/zalando/skipper/routing"
 )
@@ -442,8 +443,7 @@ func (p *Proxy) do(ctx *context) error {
 		return errProxyCanceled
 	}
 
-	ctx.incLoopCounter()
-	defer ctx.decLoopCounter()
+	ctx.loopCounter++
 
 	lookupStart := time.Now()
 	route, params := p.lookupRoute(ctx.request)
@@ -472,9 +472,9 @@ func (p *Proxy) do(ctx *context) error {
 	if ctx.deprecatedShunted() {
 		log.Debug("deprecated shunting detected in route: %s", ctx.route.Id)
 		return errProxyCanceled
-	} else if ctx.shunted() || ctx.route.Shunt {
+	} else if ctx.shunted() || ctx.route.Shunt || ctx.route.BackendType == eskip.ShuntBackend {
 		ctx.ensureDefaultResponse()
-	} else if ctx.isLoopbackRoute() {
+	} else if ctx.route.BackendType == eskip.LoopBackend {
 		loopCTX := ctx.clone()
 		if err := p.do(loopCTX); err != nil {
 			return err
