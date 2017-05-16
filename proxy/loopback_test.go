@@ -12,9 +12,14 @@ import (
 )
 
 type (
+	// filter to return all path parameters as response headers for assertions
 	returnPathParam struct{}
-	setState        struct{ name, value string }
-	copyState       struct{}
+
+	// filter to set a value in the state bag to pass around
+	setState struct{ name, value string }
+
+	// filter to return all state bag values as response headers for assertions
+	returnState struct{}
 )
 
 func (f *returnPathParam) Name() string                                       { return "returnParam" }
@@ -37,11 +42,11 @@ func (s *setState) Request(ctx filters.FilterContext) {
 
 func (s *setState) Response(filters.FilterContext) {}
 
-func (c *copyState) Name() string                                       { return "copyState" }
-func (c *copyState) CreateFilter([]interface{}) (filters.Filter, error) { return c, nil }
-func (c *copyState) Request(filters.FilterContext)                      {}
+func (c *returnState) Name() string                                       { return "returnState" }
+func (c *returnState) CreateFilter([]interface{}) (filters.Filter, error) { return c, nil }
+func (c *returnState) Request(filters.FilterContext)                      {}
 
-func (c *copyState) Response(ctx filters.FilterContext) {
+func (c *returnState) Response(ctx filters.FilterContext) {
 	for k, v := range ctx.StateBag() {
 		ctx.Response().Header.Add("X-State-Bag", k+"="+v.(string))
 	}
@@ -89,7 +94,7 @@ func testLoopback(
 	fr.Register(&preserveOriginalSpec{})
 	fr.Register(&returnPathParam{})
 	fr.Register(&setState{})
-	fr.Register(&copyState{})
+	fr.Register(&returnState{})
 
 	p, err := newTestProxyWithFiltersAndParams(fr, routes, params)
 	if err != nil {
@@ -151,15 +156,6 @@ func testLoopback(
 	if params.Flags.PreserveOriginal() && w.Header().Get("X-Test-Preserved") != "test-value" {
 		t.Error("failed to preserve original response")
 	}
-}
-
-func times(n int, f func()) {
-	if n == 0 {
-		return
-	}
-
-	f()
-	times(n-1, f)
 }
 
 func TestLoopbackShunt(t *testing.T) {
@@ -389,7 +385,7 @@ func TestLoopbackStatebag(t *testing.T) {
 
 		loopRoute2: Header("X-Loop-Route", "2")
 			-> appendResponseHeader("X-Loop-Route-Done", "2")
-			-> copyState()
+			-> returnState()
 			-> "$backend";
 	`
 
