@@ -36,6 +36,7 @@ const (
 	patchPrependFile
 	patchAppend
 	patchAppendFile
+	patchBackend
 )
 
 var commandToValidations = map[command]validateSelectFunc{
@@ -55,6 +56,7 @@ type medium struct {
 	oauthToken   string
 	patchFilters string
 	patchFile    string
+	backend      string
 }
 
 var (
@@ -155,7 +157,7 @@ func validateSelectDelete(media []*medium) (a cmdArgs, err error) {
 func validateSelectPatch(media []*medium) (a cmdArgs, err error) {
 	for _, m := range media {
 		switch m.typ {
-		case patchPrepend, patchPrependFile, patchAppend, patchAppendFile:
+		case patchPrepend, patchPrependFile, patchAppend, patchAppendFile, patchBackend:
 		case inlineIds:
 			err = invalidInputType
 			return

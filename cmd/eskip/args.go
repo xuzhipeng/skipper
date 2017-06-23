@@ -35,6 +35,7 @@ const (
 	prependFileFlag    = "prepend-file"
 	appendFiltersFlag  = "append"
 	appendFileFlag     = "append-file"
+	setBackendFlag     = "set-backend"
 	prettyFlag         = "pretty"
 	jsonFlag           = "json"
 
@@ -68,6 +69,7 @@ var (
 	prependFileArg    string
 	appendFiltersArg  string
 	appendFileArg     string
+	setBackendArg     string
 	pretty            bool
 	printJson         bool
 )
@@ -100,6 +102,8 @@ func initFlags() {
 	flags.StringVar(&prependFileArg, prependFileFlag, "", prependFileUsage)
 	flags.StringVar(&appendFiltersArg, appendFiltersFlag, "", appendFiltersUsage)
 	flags.StringVar(&appendFileArg, appendFileFlag, "", appendFileUsage)
+
+	flags.StringVar(&setBackendArg, setBackendFlag, "", setBackendFlag)
 
 	flags.BoolVar(&pretty, prettyFlag, false, prettyUsage)
 	flags.BoolVar(&printJson, jsonFlag, false, jsonUsage)
@@ -212,7 +216,7 @@ func processStdin() *medium {
 	return &medium{typ: stdin}
 }
 
-func processPatchArgs(pfilters, pfile, afilters, afile string) []*medium {
+func processPatchArgs(pfilters, pfile, afilters, afile, backend string) []*medium {
 	var media []*medium
 
 	if pfilters != "" {
@@ -229,6 +233,10 @@ func processPatchArgs(pfilters, pfile, afilters, afile string) []*medium {
 
 	if afile != "" {
 		media = append(media, &medium{typ: patchAppendFile, patchFile: afile})
+	}
+
+	if backend != "" {
+		media = append(media, &medium{typ: patchBackend, backend: backend})
 	}
 
 	return media
@@ -290,7 +298,7 @@ func processArgs() ([]*medium, error) {
 	}
 
 	patchMedia := processPatchArgs(
-		prependFiltersArg, prependFileArg, appendFiltersArg, appendFileArg)
+		prependFiltersArg, prependFileArg, appendFiltersArg, appendFileArg, setBackendArg)
 	media = append(media, patchMedia...)
 
 	return media, nil

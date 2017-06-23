@@ -1,17 +1,3 @@
-// Copyright 2015 Zalando SE
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
@@ -174,8 +160,29 @@ func takePatchFilters(media []*medium) (prep, app []*eskip.Filter, err error) {
 	return
 }
 
+func takePatchBackend(media []*medium) (string, error) {
+	for _, m := range media {
+		if m.typ != patchBackend {
+			continue
+		}
+
+		if m.backend == "" {
+			return "", errors.New("patch backend cannot be empty")
+		}
+
+		return m.backend, nil
+	}
+
+	return "", nil
+}
+
 func patchCmd(a cmdArgs) error {
 	pf, af, err := takePatchFilters(a.allMedia)
+	if err != nil {
+		return err
+	}
+
+	h, err := takePatchBackend(a.allMedia)
 	if err != nil {
 		return err
 	}
@@ -187,6 +194,23 @@ func patchCmd(a cmdArgs) error {
 
 	for _, r := range lr {
 		r.Filters = append(pf, append(r.Filters, af...)...)
+		if h != "" {
+			println("setting backend", h)
+			r.Backend = h
+
+			switch h {
+			case "<shunt>":
+				r.BackendType = eskip.ShuntBackend
+			case "<loopback>":
+				r.BackendType = eskip.LoopBackend
+			default:
+				r.BackendType = eskip.NetworkBackend
+			}
+
+			// legacy support
+			r.Shunt = h == "<shunt>"
+		}
+
 		if r.Id == "" {
 			fmt.Fprintln(stdout, r.String())
 		} else {
